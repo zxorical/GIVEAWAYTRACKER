@@ -51,3 +51,21 @@ export interface DetectedGiveaway {
   endsAt: number | null;
   buttonCustomId?: string;
 }
+
+// ─── New: Clean message structure for detection ──────────────────────
+
+export interface GiveawayMessage {
+  content?: string;
+  embeds?: {
+    title?: string;
+    description?: string;
+    footer?: { text?: string };
+    fields?: { name: string; value: string }[];
+  }[];
+  buttons?: {
+    customId?: string;
+    label?: string;
+    disabled?: boolean;
+    style?: number;
+  }[];
+}
