@@ -30,6 +30,7 @@ export interface GiveawayData {
   status: 'active' | 'ended' | 'unknown';
   notifiedAt: number | null;
   lastSeenAt: number;
+  inviteUrl?: string;
 }
 
 export interface GiveawayStats {
