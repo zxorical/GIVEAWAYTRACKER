@@ -38,7 +38,7 @@ import {
 import { BotManager } from './bot.js';
 
 // ---------------------------------------------------------------------------
-// Constants – tighten detection with multiple layers
+// Constants
 // ---------------------------------------------------------------------------
 
 const ALLOWED_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
@@ -99,7 +99,7 @@ const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
 ];
 
 // ---------------------------------------------------------------------------
-// Giveaway Scoring System – prevents false positives
+// Scoring System
 // ---------------------------------------------------------------------------
 enum GiveawaySignal {
   ENTRY_BUTTON = 3,
@@ -145,6 +145,10 @@ export class GiveawayManager extends EventEmitter {
   private readonly botManager: BotManager | null;
   private readonly userToken: string;
 
+  // Aggressive invite cache – re‑use for 30 minutes
+  private inviteCache = new Map<string, { url: string; expiresAt: number }>();
+  private pendingInvites = new Map<string, Promise<string>>();
+
   private stats = {
     detected: 0,
     notified: 0,
@@ -173,6 +177,7 @@ export class GiveawayManager extends EventEmitter {
   // Public API
   // -------------------------------------------------------------------------
   public async handleMessage(message: Message): Promise<void> {
+    // Fast‑path guards (0ms)
     if (!message.guild) return;
     if (message.author?.id === this.client.user?.id) return;
 
@@ -185,30 +190,20 @@ export class GiveawayManager extends EventEmitter {
 
     if (!this.isAllowedBot(message)) return;
 
+    // Blocked content check (instant regex)
     const content = message.content || '';
     if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
-      this.log.debug('Blocked message (results/confirmation)', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        botId: message.author?.id,
-        preview: truncate(content, 60),
-      });
       return;
     }
 
     for (const embed of message.embeds ?? []) {
       const text = [embed.title, embed.description].join(' ').toLowerCase();
       if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(text))) {
-        this.log.debug('Blocked embed (results/confirmation)', {
-          component: 'GiveawayManager',
-          account: this.accountLabel,
-          botId: message.author?.id,
-          embedTitle: embed.title,
-        });
         return;
       }
     }
 
+    // Deduplication (sync)
     const existing = getGiveaway(message.id, message.channel.id);
     if (existing) {
       updateLastSeen(message.id, message.channel.id);
@@ -218,12 +213,14 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
+    // Scoring + detection (sync + minimal async)
     const detected = await this.detectGiveaway(message);
     if (!detected) {
       this.stats.falsePositivesBlocked++;
       return;
     }
 
+    // Store
     const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
       messageId: message.id,
       channelId: message.channel.id,
@@ -237,58 +234,32 @@ export class GiveawayManager extends EventEmitter {
     };
 
     const inserted = insertGiveaway(data);
-    if (!inserted) {
-      this.log.debug('Giveaway already in DB', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        messageId: message.id,
-      });
-      return;
-    }
+    if (!inserted) return;
 
     this.stats.detected++;
 
     if (wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
       this.stats.skipped++;
-      this.log.debug('Notification cooldown active', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        messageId: message.id,
-      });
       return;
     }
 
-    await this.sendNotification(data);
+    // Fire notification – invite is fetched async, NOT awaited here
+    this.sendNotification(data);
   }
 
   // -------------------------------------------------------------------------
-  // Core Detection with scoring
+  // Detection (kept fast – only button retry may add ~300ms if needed)
   // -------------------------------------------------------------------------
   private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
     const signals = await this.collectSignals(message);
     const score = Object.values(signals).reduce((sum, v) => sum + v, 0);
-
-    this.log.debug('Giveaway scoring', {
-      component: 'GiveawayManager',
-      account: this.accountLabel,
-      messageId: message.id,
-      score,
-      signals,
-    });
 
     if (score < MINIMUM_SCORE_THRESHOLD) return null;
 
     const prize = this.extractPrize(message);
     const endsAt = this.extractEndTimestamp(message);
 
-    if (endsAt && endsAt < Date.now()) {
-      this.log.debug('Giveaway already ended', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        messageId: message.id,
-      });
-      return null;
-    }
+    if (endsAt && endsAt < Date.now()) return null;
 
     let source = DetectionSource.CONTENT;
     if (signals.ENTRY_BUTTON) source = DetectionSource.COMPONENT;
@@ -331,36 +302,28 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    const hasTimestamp = this.extractEndTimestamp(message) !== null;
-    if (hasTimestamp) signals['FUTURE_TIMESTAMP'] = GiveawaySignal.FUTURE_TIMESTAMP;
+    if (this.extractEndTimestamp(message) !== null) {
+      signals['FUTURE_TIMESTAMP'] = GiveawaySignal.FUTURE_TIMESTAMP;
+    }
 
     return signals;
   }
 
   // -------------------------------------------------------------------------
-  // Button detection (with retry)
+  // Button detection (retry only if needed)
   // -------------------------------------------------------------------------
   private async hasEntryButton(message: Message): Promise<boolean> {
-    let button = this.extractEntryButton(message);
+    const button = this.extractEntryButton(message);
     if (button) return true;
 
-    for (let i = 0; i < 2; i++) {
-      await delay(300);
-      try {
-        const refreshed = await message.fetch();
-        button = this.extractEntryButton(refreshed);
-        if (button) return true;
-      } catch (err) {
-        this.log.warn('Failed to fetch message for button retry', {
-          component: 'GiveawayManager',
-          account: this.accountLabel,
-          messageId: message.id,
-          error: formatError(err),
-        });
-        break;
-      }
+    // Single retry only (reduced from 2)
+    await delay(200);
+    try {
+      const refreshed = await message.fetch();
+      return !!this.extractEntryButton(refreshed);
+    } catch {
+      return false;
     }
-    return false;
   }
 
   private extractEntryButton(message: Message): ButtonInfo | null {
@@ -377,13 +340,8 @@ export class GiveawayManager extends EventEmitter {
         if (!customId) continue;
 
         const label = (comp.label || '').trim();
-
-        if (TRUSTED_ENTRY_CUSTOM_IDS.has(customId)) {
-          return { customId, label: label || customId };
-        }
-        if (ENTRY_BUTTON_LABEL_PATTERNS.some(re => re.test(label))) {
-          return { customId, label: label || 'Enter' };
-        }
+        if (TRUSTED_ENTRY_CUSTOM_IDS.has(customId)) return { customId, label: label || customId };
+        if (ENTRY_BUTTON_LABEL_PATTERNS.some(re => re.test(label))) return { customId, label: label || 'Enter' };
       }
     }
     return null;
@@ -395,7 +353,6 @@ export class GiveawayManager extends EventEmitter {
   private extractEntryReaction(message: Message): ReactionInfo | null {
     const embed = message.embeds?.[0];
     if (!embed) return null;
-
     const text = [embed.description, embed.footer?.text].filter(Boolean).join(' ');
     for (const emoji of ENTRY_EMOJI_PATTERNS) {
       if (text.includes(emoji)) return { emoji };
@@ -407,11 +364,7 @@ export class GiveawayManager extends EventEmitter {
   // Allowed bot check
   // -------------------------------------------------------------------------
   private isAllowedBot(message: Message): boolean {
-    return !!(
-      message.author?.bot &&
-      message.author.id &&
-      ALLOWED_GIVEAWAY_BOT_IDS.has(message.author.id)
-    );
+    return !!(message.author?.bot && message.author.id && ALLOWED_GIVEAWAY_BOT_IDS.has(message.author.id));
   }
 
   // -------------------------------------------------------------------------
@@ -472,141 +425,94 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Invite creation via Discord HTTP API
+  // Cached invite (non‑blocking)
   // -------------------------------------------------------------------------
-  private async createDiscordInvite(channelId: string): Promise<string> {
+  private getCachedInvite(guildId: string): string | null {
+    const cached = this.inviteCache.get(guildId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.url;
+    }
+    this.inviteCache.delete(guildId);
+    return null;
+  }
+
+  private setCachedInvite(guildId: string, url: string): void {
+    this.inviteCache.set(guildId, { url, expiresAt: Date.now() + 30 * 60 * 1000 });
+  }
+
+  private async fetchInviteForGuild(guildId: string): Promise<string> {
+    // Return cached immediately
+    const cached = this.getCachedInvite(guildId);
+    if (cached) return cached;
+
+    // Deduplicate in‑flight requests
+    const pending = this.pendingInvites.get(guildId);
+    if (pending) return pending;
+
+    const promise = this.doFetchInvite(guildId);
+    this.pendingInvites.set(guildId, promise);
+
     try {
-      const url = `https://discord.com/api/v9/channels/${channelId}/invites`;
-
-      const payload = {
-        max_age: 0,
-        max_uses: 0,
-        temporary: false,
-        unique: true,
-      };
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': this.userToken,
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        this.log.debug('Discord API invite creation failed', {
-          component: 'GiveawayManager',
-          channelId,
-          status: response.status,
-        });
-        return 'Invite unavailable';
+      const url = await promise;
+      if (url && !url.includes('unavailable') && !url.includes('not reachable')) {
+        this.setCachedInvite(guildId, url);
       }
-
-      const data = await response.json() as { code: string };
-      return `https://discord.gg/${data.code}`;
-    } catch (err) {
-      this.log.debug('Failed to create invite via API', {
-        component: 'GiveawayManager',
-        channelId,
-        error: formatError(err),
-      });
-      return 'Invite unavailable';
+      return url;
+    } finally {
+      this.pendingInvites.delete(guildId);
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Fetch invite with multiple fallback strategies
-  // -------------------------------------------------------------------------
-  private async fetchInviteForGuild(guildId: string): Promise<string> {
+  private async doFetchInvite(guildId: string): Promise<string> {
     try {
       const guild = this.client.guilds.cache.get(guildId);
-      if (!guild) {
-        return 'Server not reachable';
-      }
+      if (!guild) return 'Server not reachable';
 
-      // Strategy 1: Try existing invites
+      // 1. Existing invites
       try {
         const invites = await guild.invites.fetch();
         if (invites?.size > 0) {
           const permanent = invites.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
-          if (permanent) return permanent.url;
-          return invites.first()!.url;
+          return permanent ? permanent.url : invites.first()!.url;
         }
-      } catch {
-        this.log.debug('Could not fetch existing invites', { component: 'GiveawayManager', guildId });
-      }
+      } catch {}
 
-      // Strategy 2: Try vanity URL
+      // 2. Vanity URL
       try {
-        const vanityURL = (guild as any).vanityURLCode;
-        if (vanityURL) {
-          return `https://discord.gg/${vanityURL}`;
-        }
-      } catch {
-        this.log.debug('No vanity URL', { component: 'GiveawayManager', guildId });
-      }
+        const vanity = (guild as any).vanityURLCode;
+        if (vanity) return `https://discord.gg/${vanity}`;
+      } catch {}
 
-      // Strategy 3: Scan all text channels for invite permission
+      // 3. Create invite in first available channel
       const channels = guild.channels.cache.filter(
         (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
       ) as unknown as TextChannel[];
 
       for (const channel of channels.values()) {
         try {
-          const perms = channel.permissionsFor(guild.members.me!);
-          if (perms?.has(Permissions.FLAGS.CREATE_INSTANT_INVITE)) {
-            // Try API first
-            const apiInvite = await this.createDiscordInvite(channel.id);
-            if (apiInvite !== 'Invite unavailable') return apiInvite;
-
-            // Try library method
-            const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
-            return invite.url;
-          }
+          const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
+          return invite.url;
         } catch {
           continue;
         }
       }
 
-      // Strategy 4: Try ANY text channel as last resort
-      for (const channel of channels.values()) {
-        try {
-          const apiInvite = await this.createDiscordInvite(channel.id);
-          if (apiInvite !== 'Invite unavailable') return apiInvite;
-        } catch {
-          continue;
-        }
-      }
-
-      // Absolute fallback
       return `https://discord.com/channels/${guildId}`;
-    } catch (err) {
-      this.log.debug('Failed to get invite for guild', {
-        component: 'GiveawayManager',
-        guildId,
-        error: formatError(err),
-      });
+    } catch {
       return `https://discord.com/channels/${guildId}`;
     }
   }
 
   // -------------------------------------------------------------------------
-  // Notification logic
+  // Notification (non‑blocking – invite is fetched in background)
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
-    if (!this.botManager) {
-      this.log.warn('No bot manager – notification not sent', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-      });
-      return;
-    }
+    if (!this.botManager) return;
 
-    const inviteUrl = await this.fetchInviteForGuild(data.guildId);
+    // 1. Send notification IMMEDIATELY with cached invite (or placeholder)
+    const cachedInvite = this.getCachedInvite(data.guildId) || `https://discord.com/channels/${data.guildId}`;
 
     const fullData: GiveawayData = {
       ...data,
@@ -614,39 +520,26 @@ export class GiveawayManager extends EventEmitter {
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
-      inviteUrl,
+      inviteUrl: cachedInvite,
     };
 
     const sent = await this.botManager.sendGiveawayNotification(fullData);
     if (sent) {
       this.stats.notified++;
       markNotified(data.messageId, data.channelId);
-
-      this.log.info('✅ Giveaway notification sent', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        prize: truncate(data.prize, 60),
-        guild: data.guildName,
-        channel: data.channelName,
-      });
     } else {
       this.stats.errors++;
-      this.log.error('Failed to send giveaway notification', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        prize: truncate(data.prize, 60),
-      });
     }
+
+    // 2. Fetch real invite in background – will be cached for next time
+    this.fetchInviteForGuild(data.guildId).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
   // Statistics and shutdown
   // -------------------------------------------------------------------------
   public getStats() {
-    return {
-      ...this.stats,
-      uptime: Date.now() - this.stats.startedAt,
-    };
+    return { ...this.stats, uptime: Date.now() - this.stats.startedAt };
   }
 
   public logStats(): void {
@@ -663,15 +556,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   public resetStats(): void {
-    this.stats = {
-      detected: 0,
-      notified: 0,
-      skipped: 0,
-      errors: 0,
-      falsePositivesBlocked: 0,
-      startedAt: Date.now(),
-    };
-    this.log.warn('Stats reset', { component: 'GiveawayManager', account: this.accountLabel });
+    this.stats = { detected: 0, notified: 0, skipped: 0, errors: 0, falsePositivesBlocked: 0, startedAt: Date.now() };
   }
 
   public async shutdown(): Promise<void> {
