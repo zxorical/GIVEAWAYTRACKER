@@ -1,6 +1,7 @@
 /**
  * @module bot
  * Real Discord bot for notifications and slash commands
+ * UI matches the Jimbo-style giveaway embed with live countdown
  */
 
 import {
@@ -14,6 +15,11 @@ import {
   Interaction,
   CacheType,
   TextChannel,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Guild,
+  GuildChannel,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -128,7 +134,6 @@ commands.set('setchannel', async (interaction) => {
     return;
   }
 
-  // Update config in memory (persists until restart)
   (CONFIG as any).trackerChannelId = channel.id;
 
   await interaction.reply({
@@ -169,6 +174,7 @@ commands.set('status', async (interaction) => {
 export class BotManager {
   private client: Client;
   private commandsRegistered = false;
+  private inviteCache = new Map<string, string>();
 
   constructor(private readonly botToken: string) {
     this.client = new Client({
@@ -176,6 +182,7 @@ export class BotManager {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
       ],
     });
 
@@ -219,43 +226,100 @@ export class BotManager {
   }
 
   /**
-   * Send a giveaway notification to the configured tracker channel
+   * Send a giveaway notification with Jimbo-style UI
+   * Includes: server logo, server name, live countdown, invite, message, jump
    */
   public async sendGiveawayNotification(data: GiveawayData): Promise<boolean> {
     const channelId = CONFIG.trackerChannelId;
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
 
     if (!channel) {
-      logger.error(`Tracker channel ${channelId} not found or not a text channel`, {
+      logger.error(`Tracker channel ${channelId} not found`, {
         component: 'BotManager',
         availableChannels: this.client.channels.cache.size,
       });
       return false;
     }
 
-    const endsAt = data.endsAt ? formatTimestamp(data.endsAt) : 'Unknown';
-    const jumpUrl = `https://discord.com/channels/${data.guildId}/${data.channelId}/${data.messageId}`;
+    // Get guild info
+    const guild = this.client.guilds.cache.get(data.guildId);
+    const guildName = guild?.name || data.guildName || 'Unknown Server';
+    const serverIcon = guild?.iconURL({ size: 256 }) || null;
 
+    // Get channel name with mention
+    const channelObj = guild?.channels.cache.get(data.channelId) as GuildChannel | undefined;
+    const channelMention = channelObj ? `<#${data.channelId}>` : `#${data.channelName}`;
+
+    // Get invite
+    const inviteUrl = await this.fetchServerInvite(guild, data.guildId);
+
+    // Extract winner count from prize (if any)
+    const winnerCount = this.extractWinnerCount(data.prize);
+    const giveawayType = this.extractGiveawayType(data.prize);
+
+    // Calculate worth rating based on prize value or estimated worth
+    const worthRating = this.calculateWorthRating(data);
+
+    // Calculate live countdown
+    const endsAt = data.endsAt || Date.now() + 3600000;
+    const countdownStr = this.formatCountdown(endsAt);
+
+    // Get time since detection
+    const detectionTime = Date.now() - data.detectedAt;
+
+    // Build the embed
     const embed = new EmbedBuilder()
-      .setTitle('🎁 New Giveaway Detected')
-      .setDescription(truncate(data.prize, 200))
-      .addFields(
-        { name: '🏠 Server', value: data.guildName, inline: true },
-        { name: '📢 Channel', value: `#${data.channelName}`, inline: true },
-        { name: '⏰ Ends At', value: endsAt, inline: true },
-        { name: '🔗 Jump', value: `[Click here](${jumpUrl})`, inline: false },
+      .setAuthor({
+        name: 'Giveaway Tracker',
+        iconURL: this.client.user?.displayAvatarURL(),
+      })
+      .setTitle(data.prize || 'Unknown Giveaway')
+      .setDescription(
+        `**${guildName}**\n\n` +
+        `**Winners:** \`${winnerCount}\`  **Type:** \`${giveawayType}\`\n` +
+        `**Worth Joining:** ${worthRating}\n\n` +
+        `**Ends:** ${countdownStr}\n\n` +
+        `**Server Invite:** ${inviteUrl}`
       )
       .setColor(0x5865F2)
-      .setTimestamp()
-      .setFooter({ text: `Detected by ${data.authorId || 'unknown'}` });
+      .setThumbnail(serverIcon)
+      .setFooter({
+        text: `Made by Jimbo • Detected in ${detectionTime}ms • ${formatTimestamp(Date.now())}`,
+      })
+      .setTimestamp();
+
+    // Build button row: Join | Message | Jump To Giveaway
+    const row = new ActionRowBuilder<ButtonBuilder>()
+      .addComponents(
+        new ButtonBuilder()
+          .setLabel('Join')
+          .setStyle(ButtonStyle.Link)
+          .setURL(inviteUrl || `https://discord.gg/${data.guildId}`),
+        new ButtonBuilder()
+          .setLabel('Message')
+          .setStyle(ButtonStyle.Link)
+          .setURL(`https://discord.com/channels/@me/${data.authorId}`),
+        new ButtonBuilder()
+          .setLabel('Jump To Giveaway')
+          .setStyle(ButtonStyle.Link)
+          .setURL(`https://discord.com/channels/${data.guildId}/${data.channelId}/${data.messageId}`),
+      );
 
     try {
-      await channel.send({ embeds: [embed] });
+      // Send with @everyone ping
+      await channel.send({
+        content: '@everyone',
+        embeds: [embed],
+        components: [row],
+      });
+
       logger.info(`Notification sent for giveaway ${data.messageId}`, {
         component: 'BotManager',
         channel: channelId,
         prize: truncate(data.prize, 50),
+        guild: guildName,
       });
+
       return true;
     } catch (err) {
       logger.error('Failed to send notification', {
@@ -265,6 +329,158 @@ export class BotManager {
       return false;
     }
   }
+
+  /**
+   * Fetch or generate a server invite
+   */
+  private async fetchServerInvite(guild: Guild | undefined, guildId: string): Promise<string> {
+    // Check cache
+    if (this.inviteCache.has(guildId)) {
+      return this.inviteCache.get(guildId)!;
+    }
+
+    if (!guild) {
+      return `https://discord.gg/${guildId}`;
+    }
+
+    try {
+      // Try to find an existing invite
+      const invites = await guild.invites.fetch();
+      const invite = invites.find(i => i.maxUses === 0 || i.maxUses === null);
+
+      if (invite) {
+        const url = `https://discord.gg/${invite.code}`;
+        this.inviteCache.set(guildId, url);
+        return url;
+      }
+
+      // Try to create a new invite
+      const channel = guild.channels.cache.find(
+        (ch): ch is TextChannel => ch.isTextBased() && ch.permissionsFor(guild.members.me!)?.has('CreateInvite')
+      );
+
+      if (channel) {
+        const newInvite = await channel.createInvite({
+          maxAge: 86400,
+          maxUses: 1,
+        });
+        const url = `https://discord.gg/${newInvite.code}`;
+        this.inviteCache.set(guildId, url);
+        return url;
+      }
+
+      return `https://discord.gg/${guildId}`;
+    } catch (err) {
+      logger.debug('Failed to fetch/create invite', {
+        component: 'BotManager',
+        guildId,
+        error: formatError(err),
+      });
+      return `https://discord.gg/${guildId}`;
+    }
+  }
+
+  /**
+   * Extract winner count from prize string
+   * Example: "UVSA Hat" → "1"
+   * Example: "5x Nitro" → "5"
+   */
+  private extractWinnerCount(prize: string): string {
+    const match = prize.match(/(\d+)\s*[xX×]/);
+    if (match) return match[1];
+
+    // Check for common patterns
+    if (/\b(?:one|1)\s*(?:winner|win|giveaway)/i.test(prize)) return '1';
+    if (/(\d+)\s*(?:winners?)/i.test(prize)) {
+      const m = prize.match(/(\d+)\s*(?:winners?)/i);
+      return m ? m[1] : '1';
+    }
+
+    return '1';
+  }
+
+  /**
+   * Extract giveaway type from prize
+   */
+  private extractGiveawayType(prize: string): string {
+    if (/nitro/i.test(prize)) return 'Nitro';
+    if (/game|steam|epic/i.test(prize)) return 'Game';
+    if (/crypto|btc|eth/i.test(prize)) return 'Crypto';
+    if (/gift|card|voucher/i.test(prize)) return 'Gift Card';
+    if (/boost/i.test(prize)) return 'Boost';
+    if (/role|rank/i.test(prize)) return 'Role';
+    if (/hat|skin|item|weapon/i.test(prize)) return 'Item';
+    return 'Custom';
+  }
+
+  /**
+   * Calculate worth rating (stars)
+   */
+  private calculateWorthRating(data: GiveawayData): string {
+    const prize = data.prize || '';
+
+    // Check for known high-value keywords
+    if (/nitro|month|year|premium|plus/i.test(prize)) {
+      return '★★★★★';
+    }
+    if (/game|steam|playstation|xbox|switch|code/i.test(prize)) {
+      return '★★★★☆';
+    }
+    if (/gift|card|voucher|discount/i.test(prize)) {
+      return '★★★☆☆';
+    }
+    if (/hat|skin|item|weapon|role|rank/i.test(prize)) {
+      return '★★☆☆☆';
+    }
+
+    // Check for numbers that might indicate value
+    const valueMatch = prize.match(/\$(\d+)/);
+    if (valueMatch) {
+      const value = parseInt(valueMatch[1]);
+      if (value > 50) return '★★★★★';
+      if (value > 20) return '★★★★☆';
+      if (value > 10) return '★★★☆☆';
+      return '★★☆☆☆';
+    }
+
+    return '★★★★☆';
+  }
+
+  /**
+   * Format countdown with live timer
+   * Returns: "Friday, 10 July 2026 at 06:22 pm (in 29 seconds)"
+   */
+  private formatCountdown(endsAt: number): string {
+    const now = Date.now();
+    const diff = Math.max(0, endsAt - now);
+
+    // Format the date
+    const date = new Date(endsAt);
+    const options: Intl.DateTimeFormatOptions = {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    };
+    const formattedDate = date.toLocaleString('en-US', options);
+
+    // Format time remaining
+    const remaining = formatDuration(diff);
+
+    return `${formattedDate} (in ${remaining})`;
+  }
+
+  /**
+   * Get channel mention for the tracker channel
+   */
+  public getTrackerChannelMention(): string {
+    return `<#${CONFIG.trackerChannelId}>`;
+  }
+
+  // ---- Slash command registration ----
 
   private async registerCommands(): Promise<void> {
     if (this.commandsRegistered) return;
