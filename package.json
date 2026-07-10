@@ -1,0 +1,33 @@
+{
+  "name": "giveaway-tracker",
+  "version": "2.0.0",
+  "description": "Discord giveaway tracker using self-bots for detection and a real bot for notifications",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc --project tsconfig.json",
+    "dev": "nodemon --watch src --ext ts --exec \"node --loader ts-node/esm src/index.ts\"",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.2.2",
+    "chalk": "4.1.2",
+    "discord.js": "^14.14.1",
+    "discord.js-selfbot-v13": "^3.3.1",
+    "dotenv": "^16.4.5",
+    "lru-cache": "^10.0.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.11.10",
+    "nodemon": "^3.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
