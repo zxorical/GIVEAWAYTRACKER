@@ -1,6 +1,6 @@
 /**
  * @module database
- * JSON file-based database — no compilation needed, works everywhere
+ * JSON file-based database — no compilation needed
  */
 
 import fs from 'fs';
@@ -25,16 +25,12 @@ interface StoredGiveaway {
   lastSeenAt: number;
 }
 
-// File path
 const DB_FILE = CONFIG.dbPath;
 const DB_DIR = path.dirname(DB_FILE);
 
-// In-memory store
 let data: StoredGiveaway[] = [];
 let nextId = 1;
 let loaded = false;
-
-// ---- Load/Save ----
 
 function loadDb(): void {
   if (loaded) return;
@@ -70,8 +66,6 @@ function saveDb(): void {
     logger.error('Failed to save JSON DB', { component: 'Database', error: String(err) });
   }
 }
-
-// ---- Public API ----
 
 export function getDb(): null {
   loadDb();
@@ -199,8 +193,6 @@ export function closeDb(): void {
   if (data.length > 0) saveDb();
   logger.debug('Database closed', { component: 'Database' });
 }
-
-// ---- Helpers ----
 
 function rowToGiveaway(row: StoredGiveaway): GiveawayData {
   return {
