@@ -32,17 +32,11 @@ export interface GiveawayData {
   lastSeenAt: number;
 }
 
-export interface AppConfig {
-  tokens: string[];
-  botToken: string;
-  trackerChannelId: string;
-  monitoredChannels: string[];
-  dbPath: string;
-  logLevel: string;
-  logDir: string;
-  notificationCooldown: number;
-  statsIntervalMs: number;
-  adminUserIds: string[];
+export interface GiveawayStats {
+  totalDetected: number;
+  activeGiveaways: number;
+  serversWithGiveaways: number;
+  lastDetected: number | null;
 }
 
 export enum DetectionSource {
