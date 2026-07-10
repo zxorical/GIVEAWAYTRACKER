@@ -143,6 +143,7 @@ export class GiveawayManager extends EventEmitter {
   private readonly log: AppLogger;
   private readonly accountLabel: string;
   private readonly botManager: BotManager | null;
+  private readonly userToken: string;
 
   private stats = {
     detected: 0,
@@ -165,6 +166,7 @@ export class GiveawayManager extends EventEmitter {
     this.log = log;
     this.accountLabel = accountLabel;
     this.botManager = botManager;
+    this.userToken = token; // store the selfbot token for API calls
   }
 
   // -------------------------------------------------------------------------
@@ -470,19 +472,61 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Invite fetching (via selfbot) – fixed permission flag
+  // Invite creation via Discord HTTP API (raw fetch)
   // -------------------------------------------------------------------------
+  private async createDiscordInvite(channelId: string): Promise<string> {
+    try {
+      const url = `https://discord.com/api/v9/channels/${channelId}/invites`;
+
+      const payload = {
+        max_age: 0,        // never expires
+        max_uses: 0,       // unlimited uses
+        temporary: false,
+        unique: true,
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': this.userToken,
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.log.debug('Discord API invite creation failed', {
+          channelId,
+          status: response.status,
+          error: errorText,
+        });
+        return 'Invite unavailable';
+      }
+
+      const data = await response.json() as { code: string };
+      return `https://discord.gg/${data.code}`;
+    } catch (err) {
+      this.log.debug('Failed to create invite via API', {
+        channelId,
+        error: formatError(err),
+      });
+      return 'Invite unavailable';
+    }
+  }
+
   private async fetchInviteForGuild(guildId: string): Promise<string> {
     try {
       const guild = this.client.guilds.cache.get(guildId);
       if (!guild) return 'Server not reachable';
 
-      // Try existing permanent invites
+      // Try existing permanent invites first (still useful)
       const invites = await guild.invites.fetch().catch(() => null);
       const permanent = invites?.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
       if (permanent) return permanent.url;
 
-      // Find a text channel where we can create an invite
+      // Find a text channel to create an invite in
       const channel = guild.channels.cache.find(
         (ch): ch is TextChannel =>
           ch.type === 'GUILD_TEXT' &&
@@ -490,8 +534,7 @@ export class GiveawayManager extends EventEmitter {
       ) as TextChannel | undefined;
 
       if (channel) {
-        const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
-        return invite.url;
+        return await this.createDiscordInvite(channel.id);
       }
 
       // Fallback – try any text channel
@@ -500,8 +543,7 @@ export class GiveawayManager extends EventEmitter {
       ) as TextChannel | undefined;
 
       if (anyText) {
-        const invite = await anyText.createInvite({ maxAge: 0, maxUses: 0 });
-        return invite.url;
+        return await this.createDiscordInvite(anyText.id);
       }
 
       return 'No invite permission';
@@ -528,7 +570,7 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
-    // Fetch invite using the selfbot
+    // Fetch invite using the selfbot's token via HTTP API
     const inviteUrl = await this.fetchInviteForGuild(data.guildId);
 
     const fullData: GiveawayData = {
