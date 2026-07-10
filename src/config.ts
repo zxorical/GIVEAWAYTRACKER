@@ -1,6 +1,7 @@
 /**
  * @module config
  * Environment configuration loader with validation
+ * Now uses JSON file instead of SQLite
  */
 
 import 'dotenv/config';
@@ -54,11 +55,14 @@ function tokensEnv(): string[] {
 }
 
 export const CONFIG: AppConfig = {
+  // Required
   tokens: tokensEnv(),
   botToken: requireEnv('DISCORD_BOT_TOKEN'),
   trackerChannelId: requireEnv('TRACKER_CHANNEL_ID'),
+
+  // Optional with defaults
   monitoredChannels: csvEnv('MONITORED_CHANNELS'),
-  dbPath: optionalEnv('DB_PATH', './data/giveaways.db'),
+  dbPath: optionalEnv('DB_PATH', './data/giveaways.json'),
   logLevel: optionalEnv('LOG_LEVEL', 'info'),
   logDir: optionalEnv('LOG_DIR', './logs'),
   notificationCooldown: assertInt(
@@ -76,3 +80,19 @@ export const CONFIG: AppConfig = {
 CONFIG.monitoredChannels.forEach((id, i) => assertSnowflake(id, `MONITORED_CHANNELS[${i}]`));
 assertSnowflake(CONFIG.trackerChannelId, 'TRACKER_CHANNEL_ID');
 CONFIG.adminUserIds.forEach((id, i) => assertSnowflake(id, `ADMIN_USER_IDS[${i}]`));
+
+// Validate tokens
+if (CONFIG.tokens.length === 0) {
+  throw new Error('At least one token is required in DISCORD_TOKENS');
+}
+
+// Log config summary (without exposing tokens)
+console.log('[Config] Loaded successfully');
+console.log(`  - Accounts: ${CONFIG.tokens.length}`);
+console.log(`  - Bot Token: ${CONFIG.botToken ? '✅ Set' : '❌ Missing'}`);
+console.log(`  - Tracker Channel: ${CONFIG.trackerChannelId ? '✅ Set' : '❌ Missing'}`);
+console.log(`  - Monitored Channels: ${CONFIG.monitoredChannels.length || 'All'}`);
+console.log(`  - DB Path: ${CONFIG.dbPath}`);
+console.log(`  - Log Level: ${CONFIG.logLevel}`);
+console.log(`  - Notification Cooldown: ${CONFIG.notificationCooldown}s`);
+console.log(`  - Admins: ${CONFIG.adminUserIds.length || 'None'}`);
