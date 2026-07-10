@@ -15,8 +15,6 @@ import { BotManager } from './bot.js';
 import { delay, formatError, formatDuration } from './utils.js';
 import { getDb, closeDb, cleanupOldGiveaways } from './database.js';
 
-// ---- Health server ----
-
 const PORT = parseInt(process.env.PORT || '3000', 10) || 3000;
 const healthServer = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
@@ -37,8 +35,6 @@ healthServer.listen(PORT, '0.0.0.0', () => {
 });
 healthServer.on('error', (err) => console.error('[Bootstrap] Health server error:', err));
 
-// ---- Process handlers ----
-
 process.on('uncaughtException', (err) => {
   try { logger.error('Uncaught exception', { component: 'Process', error: err }); } catch {}
   process.exit(1);
@@ -48,8 +44,6 @@ process.on('unhandledRejection', (reason) => {
   try { logger.warn('Unhandled rejection', { component: 'Process', reason: formatError(reason) }); } catch {}
 });
 
-// ---- State ----
-
 let activeManagers: GiveawayManager[] = [];
 let botManager: BotManager | null = null;
 let statsInterval: ReturnType<typeof setInterval> | null = null;
@@ -58,8 +52,6 @@ let shuttingDown = false;
 const CLIENT_READY_TIMEOUT_MS = 60000;
 const MAX_BOOT_RETRIES = 10;
 const BOOT_RETRY_DELAY_MS = 15000;
-
-// ---- Main ----
 
 async function main(): Promise<void> {
   reconfigureLogger(CONFIG.logLevel, CONFIG.logDir);
@@ -77,16 +69,13 @@ async function main(): Promise<void> {
     dbPath: CONFIG.dbPath,
   });
 
-  // Initialize database
   getDb();
   cleanupOldGiveaways(30);
 
-  // Start bot first (so managers can use it)
   botManager = new BotManager(CONFIG.botToken);
   await botManager.start();
   logger.info('Bot started, waiting for managers...', { component: 'Bootstrap' });
 
-  // Start self-bot accounts
   activeManagers = [];
   let authFailures = 0;
 
@@ -159,7 +148,6 @@ async function main(): Promise<void> {
     failures: authFailures,
   });
 
-  // Stats interval
   statsInterval = setInterval(() => {
     for (const m of activeManagers) {
       m.logStats();
@@ -175,8 +163,6 @@ async function main(): Promise<void> {
     statsEvery: `${CONFIG.statsIntervalMs / 1000}s`,
   });
 }
-
-// ---- Discord events ----
 
 function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('messageCreate', (msg: Message) => {
@@ -223,8 +209,6 @@ function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('error', (err) => logger.error('Client error', { component: 'Events', error: err }));
 }
 
-// ---- Helpers ----
-
 function waitForReady(client: Client, token: string): Promise<void> {
   return new Promise((resolve, reject) => {
     client.once('ready', () => resolve());
@@ -236,8 +220,6 @@ function waitForReady(client: Client, token: string): Promise<void> {
 function timeout(ms: number, message: string): Promise<never> {
   return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
 }
-
-// ---- Shutdown ----
 
 function registerShutdown(): void {
   const handle = async (signal: string): Promise<void> => {
@@ -266,8 +248,6 @@ function registerShutdown(): void {
   process.on('SIGINT', () => handle('SIGINT').catch(() => process.exit(1)));
   process.on('SIGTERM', () => handle('SIGTERM').catch(() => process.exit(1)));
 }
-
-// ---- Boot ----
 
 async function boot(): Promise<void> {
   let attempt = 0;
@@ -306,7 +286,6 @@ async function boot(): Promise<void> {
         process.exit(1);
       }
 
-      // Clean up
       for (const m of activeManagers) {
         try { (m as any).client?.destroy(); } catch {}
       }
