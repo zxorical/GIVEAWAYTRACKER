@@ -1,7 +1,6 @@
 /**
  * @module bot
  * Real Discord bot for notifications and slash commands
- * UI matches the Jimbo-style giveaway embed with live countdown
  */
 
 import {
@@ -48,8 +47,6 @@ async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>)
   }
   return true;
 }
-
-// ---- Public commands ----
 
 commands.set('stats', async (interaction) => {
   await deferReply(interaction, false);
@@ -125,13 +122,10 @@ commands.set('recent', async (interaction) => {
   await interaction.editReply({ embeds: [embed] });
 });
 
-// ---- Admin commands ----
-
 commands.set('setchannel', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   const channel = interaction.options.getChannel('channel', true);
 
-  // Check if it's a text channel using channel type
   if (channel.type !== ChannelType.GuildText && 
       channel.type !== ChannelType.GuildAnnouncement &&
       channel.type !== ChannelType.GuildForum &&
@@ -151,7 +145,6 @@ commands.set('setchannel', async (interaction) => {
 commands.set('reset', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, true);
-
   resetDatabase();
   await interaction.editReply('✅ Database reset. All tracked giveaways cleared.');
 });
@@ -174,8 +167,6 @@ commands.set('status', async (interaction) => {
 
   await interaction.editReply({ embeds: [embed] });
 });
-
-// ---- BotManager ----
 
 export class BotManager {
   private client: Client;
@@ -231,9 +222,6 @@ export class BotManager {
     await this.client.destroy();
   }
 
-  /**
-   * Send a giveaway notification with Jimbo-style UI
-   */
   public async sendGiveawayNotification(data: GiveawayData): Promise<boolean> {
     const channelId = CONFIG.trackerChannelId;
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
@@ -246,31 +234,18 @@ export class BotManager {
       return false;
     }
 
-    // Get guild info
     const guild = this.client.guilds.cache.get(data.guildId);
     const guildName = guild?.name || data.guildName || 'Unknown Server';
     const serverIcon = guild?.iconURL({ size: 256 }) || null;
-
-    // Get channel name with mention
-    const channelObj = guild?.channels.cache.get(data.channelId) as GuildChannel | undefined;
-    const channelMention = channelObj ? `<#${data.channelId}>` : `#${data.channelName}`;
-
-    // Get invite
     const inviteUrl = await this.fetchServerInvite(guild, data.guildId);
 
-    // Extract winner count from prize
     const winnerCount = this.extractWinnerCount(data.prize);
     const giveawayType = this.extractGiveawayType(data.prize);
     const worthRating = this.calculateWorthRating(data);
-
-    // Calculate live countdown
     const endsAt = data.endsAt || Date.now() + 3600000;
     const countdownStr = this.formatCountdown(endsAt);
-
-    // Get time since detection
     const detectionTime = Date.now() - data.detectedAt;
 
-    // Build the embed
     const embed = new EmbedBuilder()
       .setAuthor({
         name: 'Giveaway Tracker',
@@ -291,7 +266,6 @@ export class BotManager {
       })
       .setTimestamp();
 
-    // Build button row
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
@@ -332,9 +306,6 @@ export class BotManager {
     }
   }
 
-  /**
-   * Fetch or generate a server invite
-   */
   private async fetchServerInvite(guild: Guild | undefined, guildId: string): Promise<string> {
     if (this.inviteCache.has(guildId)) {
       return this.inviteCache.get(guildId)!;
@@ -354,11 +325,10 @@ export class BotManager {
         return url;
       }
 
-      // Find a channel to create invite
       const channel = guild.channels.cache.find(
         (ch): ch is TextChannel => 
           ch.isTextBased() && 
-          ch.permissionsFor(guild.members.me!)?.has(PermissionsBitField.Flags.CreateInvite)
+          ch.permissionsFor(guild.members.me!)?.has(PermissionsBitField.Flags.CreateInstantInvite)
       );
 
       if (channel) {
