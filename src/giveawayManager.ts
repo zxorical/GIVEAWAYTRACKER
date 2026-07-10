@@ -1,6 +1,6 @@
 /**
  * @module giveawayManager
- * Hybrid giveaway detector — combines bot ID bypass, scoring, and button detection.
+ * Pure giveaway detector — ONLY detects giveaways from known giveaway bots.
  * No entry/click/reaction code – only detect, store, notify.
  */
 
@@ -15,12 +15,7 @@ import {
   sanitizeForLog,
   formatTimestamp,
 } from './utils.js';
-import {
-  GiveawayData,
-  DetectionSource,
-  DetectedGiveaway,
-  GiveawayMessage,
-} from './types.js';
+import { GiveawayData, DetectionSource, DetectedGiveaway } from './types.js';
 import {
   insertGiveaway,
   wasNotifiedRecently,
@@ -31,9 +26,14 @@ import {
 } from './database.js';
 import { BotManager } from './bot.js';
 
-// ─── Detection Constants (merged from both systems) ──────────────────
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
-// Known giveaway bot IDs – these bypass scoring (but still check blocked)
+/**
+ * ONLY these bot IDs will be detected as giveaways.
+ * If a message isn't from one of these bots, it's ignored.
+ */
 const KNOWN_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
   '294882584201003009', // GiveawayBot
   '739448630517039104', // GiveawayBoat
@@ -44,50 +44,12 @@ const KNOWN_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
   '508391840525975553',
 ]);
 
-// Blocked patterns (confirmation messages, already entered, etc.)
-const BLOCKED_PATTERNS: RegExp[] = [
-  /join(?:ed)?\s+success(?:fully)?/i,
-  /success(?:fully)?\s+join(?:ed)?/i,
-  /entry\s+confirmed/i,
-  /entered\s+successfully/i,
-  /already\s+entered/i,
-  /already\s+joined/i,
-  /already\s+participating/i,
-  /you(?:'ve|\s+have)\s+entered/i,
-  /you(?:'ve|\s+have)\s+joined/i,
-  /you\s+are\s+entered/i,
-  /you\s+are\s+already/i,
-  /you're\s+entered/i,
-  /leave\s+giveaway/i,
-  /withdraw\s+entry/i,
-  /you(?:'ve|\s+have)\s+already\s+(?:joined|entered|participating)/i,
-];
-
-// Announcement patterns (keywords that indicate a new giveaway)
-const ANNOUNCEMENT_PATTERNS: RegExp[] = [
-  /\bnew\s+giveaway\b/i,
-  /\bgiveaway\b/i,
-  /\bhosted\s+by\b/i,
-  /\bends?\s+in\b/i,
-  /\bends?\s+at\b/i,
-  /\bwinner(?:s)?\s+(?:will|chosen|announced)/i,
-  /\bprize\b/i,
-  /\bentries?\b/i,
-  /\bparticipants?\b/i,
-  /\breact\s+to\s+enter\b/i,
-  /\bclick\s+.*enter\b/i,
-  /<t:\d{10,13}/,                     // Discord timestamp
-  /🎉/,
-  /🎁/,
-  /🏆/,
-  /\benter\s+to\s+win\b/i,
-  /\braffle\b/i,
-  /\bsweepstakes\b/i,
-];
-
-// Entry button detection
-const TRUSTED_BUTTONS: Set<string> = new Set([
-  'giveaway_message',    // GiveawayBoat participant count
+/**
+ * customIds that are always giveaway entry buttons regardless of their label.
+ * GiveawayBoat uses customId "giveaway_message" with a bare participant count.
+ */
+const TRUSTED_ENTRY_CUSTOM_IDS: ReadonlySet<string> = new Set([
+  'giveaway_message',   // GiveawayBoat — participant count button
   'giveaway-enter',
   'enter_giveaway',
   'giveaway_enter',
@@ -95,161 +57,48 @@ const TRUSTED_BUTTONS: Set<string> = new Set([
   'giveaway-join',
 ]);
 
-const BUTTON_PATTERNS: RegExp[] = [
+/**
+ * Button labels that identify a giveaway ENTRY button.
+ * Also accepts bare numbers — GiveawayBoat shows the participant count.
+ */
+const ENTRY_BUTTON_PATTERNS: ReadonlyArray<RegExp> = [
   /\benter\b/i,
   /\bjoin\b/i,
   /\bparticipate\b/i,
-  /\benter\s+giveaway\b/i,
-  /\bjoin\s+giveaway\b/i,
+  /\braffle\b/i,
+  /\bsweepstakes\b/i,
+  /\bsubmit\b/i,
+  /count\s+me\s+in/i,
+  /\bgiveaway\b/i,
   /🎉/,
   /🎁/,
+  /🏆/,
+  /^\d[\d,]*$/,   // bare participant count — GiveawayBoat style
 ];
 
-// Component retry settings
+/**
+ * If ANY of these patterns match the message content, it's rejected.
+ * Covers "already entered", "leave giveaway", "you joined", etc.
+ */
+const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
+  /already\s+entered\s+this\s+giveaway/i,
+  /you(?:'ve|\s+have)\s+already\s+entered/i,
+  /you\s+are\s+already\s+(?:in|entered|participating)/i,
+  /you(?:'ve|\s+have)\s+already\s+(?:joined|joined\s+this)/i,
+  /leave\s+giveaway/i,
+  /join(?:ed)?\s+success(?:fully)?/i,
+  /entry\s+confirmed/i,
+  /entered\s+successfully/i,
+  /you're\s+entered/i,
+  /withdraw\s+entry/i,
+];
+
 const COMPONENT_RETRY_DELAY_MS = 300;
 const COMPONENT_RETRY_ATTEMPTS = 3;
 
-// ─── Helper Functions ──────────────────────────────────────────────
-
-function collectText(msg: GiveawayMessage): string {
-  const parts: string[] = [];
-
-  if (msg.content) parts.push(msg.content);
-
-  for (const embed of msg.embeds ?? []) {
-    if (embed.title) parts.push(embed.title);
-    if (embed.description) parts.push(embed.description);
-    if (embed.footer?.text) parts.push(embed.footer.text);
-
-    for (const field of embed.fields ?? []) {
-      parts.push(field.name);
-      parts.push(field.value);
-    }
-  }
-
-  return parts.join('\n');
-}
-
-function hasEntryButton(msg: GiveawayMessage): boolean {
-  for (const btn of msg.buttons ?? []) {
-    if (btn.disabled) continue;
-
-    if (btn.customId && TRUSTED_BUTTONS.has(btn.customId)) {
-      return true;
-    }
-
-    if (btn.label && BUTTON_PATTERNS.some(r => r.test(btn.label))) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function isBlockedMessage(msg: GiveawayMessage): boolean {
-  const text = collectText(msg);
-  return BLOCKED_PATTERNS.some(r => r.test(text));
-}
-
-/**
- * Hybrid detection:
- * - If message author is a known giveaway bot → bypass scoring (but still check blocked)
- * - Otherwise → use scoring: require 2+ announcement patterns OR presence of entry button
- * - Also require minimum text length (to filter short confirmations)
- */
-function isGiveawayAnnouncement(msg: GiveawayMessage, isKnownBot: boolean): boolean {
-  const text = collectText(msg);
-
-  // Always block confirmation/duplicate messages
-  if (isBlockedMessage(msg)) {
-    return false;
-  }
-
-  // Very short messages are usually not announcements
-  if (text.trim().length < 20) {
-    return false;
-  }
-
-  // Known bot: trust it, but only if it has an entry button or strong signals
-  if (isKnownBot) {
-    // If it's a known bot, we still require either a button or at least one announcement signal
-    const hasButton = hasEntryButton(msg);
-    const hasSignal = ANNOUNCEMENT_PATTERNS.some(r => r.test(text));
-    return hasButton || hasSignal;
-  }
-
-  // For non-bot messages: use scoring
-  const announcementScore = ANNOUNCEMENT_PATTERNS.filter(r => r.test(text)).length;
-  const hasButton = hasEntryButton(msg);
-
-  // Accept if: trusted entry button exists OR score >= 2
-  if (hasButton) return true;
-  return announcementScore >= 2;
-}
-
-function extractPrizeFromMessage(msg: GiveawayMessage): string {
-  // Try embeds first
-  for (const embed of msg.embeds ?? []) {
-    if (embed.title) return embed.title;
-    if (embed.description) return embed.description;
-    for (const field of embed.fields ?? []) {
-      if (field.name && /prize|giveaway|win|you could win/i.test(field.name)) {
-        return field.value;
-      }
-    }
-  }
-
-  // Fall back to content
-  if (msg.content) return msg.content;
-
-  return 'Unknown Prize';
-}
-
-function extractEndTimestampFromMessage(msg: GiveawayMessage): number | null {
-  const text = collectText(msg);
-  const re = /<t:(\d{10,13})(?::[a-zA-Z])?>/;
-  const match = text.match(re);
-
-  if (!match?.[1]) return null;
-
-  const raw = parseInt(match[1], 10);
-  const tsMs = raw < 1e12 ? raw * 1000 : raw;
-
-  return Number.isFinite(tsMs) && tsMs > Date.now() ? tsMs : null;
-}
-
-function messageToGiveawayMessage(message: Message): GiveawayMessage {
-  const buttons: { customId?: string; label?: string; disabled?: boolean; style?: number }[] = [];
-
-  const components = (message as any).components as any[] | undefined;
-  if (components) {
-    for (const row of components) {
-      for (const comp of row.components || []) {
-        if (comp.type === 2) {
-          buttons.push({
-            customId: comp.customId || comp.custom_id,
-            label: comp.label,
-            disabled: comp.disabled === true,
-            style: comp.style,
-          });
-        }
-      }
-    }
-  }
-
-  return {
-    content: message.content || undefined,
-    embeds: message.embeds.map(e => ({
-      title: e.title || undefined,
-      description: e.description || undefined,
-      footer: e.footer ? { text: e.footer.text || undefined } : undefined,
-      fields: e.fields?.map(f => ({ name: f.name, value: f.value })),
-    })),
-    buttons: buttons.length > 0 ? buttons : undefined,
-  };
-}
-
-// ─── GiveawayManager ──────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// GiveawayManager
+// ---------------------------------------------------------------------------
 
 export class GiveawayManager extends EventEmitter {
   private readonly client: Client;
@@ -279,12 +128,16 @@ export class GiveawayManager extends EventEmitter {
     this.botManager = botManager;
   }
 
-  // ─── Public API ──────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
 
   public async handleMessage(message: Message): Promise<void> {
+    // Basic guards
     if (!message.guild) return;
     if (message.author?.id === this.client.user?.id) return;
 
+    // Channel filter
     if (
       CONFIG.monitoredChannels.length > 0 &&
       !CONFIG.monitoredChannels.includes(message.channel.id)
@@ -292,6 +145,24 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
+    // --- ONLY APPROVE FROM KNOWN GIVEAWAY BOTS ---
+    if (!this.isKnownGiveawayBot(message)) {
+      return;
+    }
+
+    // --- BLOCK CONFIRMATION / DUPLICATE MESSAGES ---
+    const content = message.content || '';
+    if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
+      this.log.debug('Blocked message from known bot', {
+        component: 'GiveawayManager',
+        account: this.accountLabel,
+        botId: message.author?.id,
+        preview: truncate(content, 60),
+      });
+      return;
+    }
+
+    // Check if already tracked
     const existing = getGiveaway(message.id, message.channel.id);
     if (existing) {
       updateLastSeen(message.id, message.channel.id);
@@ -301,9 +172,11 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
+    // Detect the giveaway
     const detected = await this.detectGiveaway(message);
     if (!detected) return;
 
+    // Store in database
     const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
       messageId: message.id,
       channelId: message.channel.id,
@@ -328,6 +201,7 @@ export class GiveawayManager extends EventEmitter {
 
     this.stats.detected++;
 
+    // Check cooldown before notifying
     if (wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
       this.stats.skipped++;
       this.log.debug('Notification cooldown active', {
@@ -338,41 +212,25 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
+    // Send notification via bot
     await this.sendNotification(data);
   }
 
-  // ─── Detection ──────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Detection
+  // ---------------------------------------------------------------------------
 
   private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
-    const msg = messageToGiveawayMessage(message);
+    // Try to find entry button
+    let button = this.extractEntryButton(message);
 
-    // Check blocked patterns first
-    if (isBlockedMessage(msg)) {
-      this.log.debug('Blocked message', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        messageId: message.id,
-      });
-      return null;
-    }
-
-    const isKnownBot = this.isKnownGiveawayBot(message);
-    const isAnnouncement = isGiveawayAnnouncement(msg, isKnownBot);
-
-    // If not known bot and not announcement → reject
-    if (!isKnownBot && !isAnnouncement) {
-      return null;
-    }
-
-    // Try to find entry button (with retry)
-    let button = this.extractEntryButtonFromMessage(msg);
+    // If no button, retry with fetch
     if (!button) {
       for (let i = 0; i < COMPONENT_RETRY_ATTEMPTS; i++) {
         await delay(COMPONENT_RETRY_DELAY_MS);
         try {
           const refreshed = await message.fetch();
-          const refreshedMsg = messageToGiveawayMessage(refreshed);
-          button = this.extractEntryButtonFromMessage(refreshedMsg);
+          button = this.extractEntryButton(refreshed);
           if (button) break;
         } catch {
           break;
@@ -380,15 +238,13 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    const prize = extractPrizeFromMessage(msg);
-    const endsAt = extractEndTimestampFromMessage(msg);
+    const prize = this.extractPrize(message);
+    const endsAt = this.extractEndTimestamp(message);
 
-    // Log detection signal
-    this.log.debug('Giveaway detection', {
+    this.log.debug('Giveaway detected from known bot', {
       component: 'GiveawayManager',
       account: this.accountLabel,
-      isKnownBot,
-      isAnnouncement,
+      botId: message.author?.id,
       hasButton: !!button,
       prize: truncate(prize, 60),
     });
@@ -401,19 +257,32 @@ export class GiveawayManager extends EventEmitter {
     };
   }
 
-  private extractEntryButtonFromMessage(msg: GiveawayMessage): { customId: string; label: string } | null {
-    for (const btn of msg.buttons ?? []) {
-      if (btn.disabled) continue;
+  private extractEntryButton(message: Message): { customId: string; label: string } | null {
+    const components = (message as any).components as any[] | undefined;
+    if (!components?.length) return null;
 
-      const customId = btn.customId;
-      const label = btn.label || '';
+    for (const row of components) {
+      const comps = row.components as any[] | undefined;
+      if (!comps) continue;
 
-      if (customId && TRUSTED_BUTTONS.has(customId)) {
-        return { customId, label: label || customId };
-      }
+      for (const comp of comps) {
+        // Must be a button (type 2) and not a link button (style 5)
+        if (comp.type !== 2 || comp.style === 5 || comp.disabled === true) continue;
 
-      if (label && BUTTON_PATTERNS.some(r => r.test(label))) {
-        return { customId: customId || 'unknown', label };
+        const customId = comp.customId || comp.custom_id;
+        if (!customId) continue;
+
+        const label = (comp.label || '').trim();
+
+        // Trusted custom IDs (GiveawayBoat participant count, etc.)
+        if (TRUSTED_ENTRY_CUSTOM_IDS.has(customId)) {
+          return { customId, label: label || customId };
+        }
+
+        // Entry button label patterns
+        if (ENTRY_BUTTON_PATTERNS.some(re => re.test(label))) {
+          return { customId, label: label || 'Enter' };
+        }
       }
     }
 
@@ -428,14 +297,51 @@ export class GiveawayManager extends EventEmitter {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Text extraction
+  // ---------------------------------------------------------------------------
+
+  private extractPrize(message: Message): string {
+    const embed = message.embeds?.[0];
+    if (embed?.title) return this.cleanText(embed.title);
+    if (embed?.description) return this.cleanText(embed.description);
+    if (message.content) return this.cleanText(message.content);
+    return 'Unknown Prize';
+  }
+
+  private extractEndTimestamp(message: Message): number | null {
+    const re = /<t:(\d{10,13})(?::[a-zA-Z])?>/;
+    const allText = [
+      message.content || '',
+      ...message.embeds.flatMap(e => [
+        e.title || '',
+        e.description || '',
+        e.footer?.text || '',
+        ...(e.fields || []).flatMap(f => [f.name, f.value]),
+      ]),
+    ].join(' ');
+
+    const match = allText.match(re);
+    if (!match?.[1]) return null;
+
+    const raw = parseInt(match[1], 10);
+    const tsMs = raw < 1e12 ? raw * 1000 : raw;
+    return Number.isFinite(tsMs) && tsMs > Date.now() ? tsMs : null;
+  }
+
   private isEnded(message: Message): boolean {
-    const msg = messageToGiveawayMessage(message);
-    const endsAt = extractEndTimestampFromMessage(msg);
+    const endsAt = this.extractEndTimestamp(message);
     if (endsAt === null) return false;
     return endsAt < Date.now();
   }
 
-  // ─── Notification ─────────────────────────────────────────────────
+  private cleanText(text: string): string {
+    return truncate(sanitizeForLog(text), 200);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notification
+  // ---------------------------------------------------------------------------
 
   private async sendNotification(data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): Promise<void> {
     if (!this.botManager) {
@@ -471,7 +377,9 @@ export class GiveawayManager extends EventEmitter {
     }
   }
 
-  // ─── Stats ─────────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Stats
+  // ---------------------------------------------------------------------------
 
   public getStats() {
     return {
