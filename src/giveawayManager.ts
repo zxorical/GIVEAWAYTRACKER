@@ -1,6 +1,6 @@
 /**
  * @module giveawayManager
- * Pure giveaway detector — ONLY detects giveaways from known giveaway bots.
+ * Pure giveaway detector — ONLY detects giveaways from a specific bot ID.
  * No entry/click/reaction code – only detect, store, notify.
  */
 
@@ -31,17 +31,11 @@ import { BotManager } from './bot.js';
 // ---------------------------------------------------------------------------
 
 /**
- * ONLY these bot IDs will be detected as giveaways.
- * If a message isn't from one of these bots, it's ignored.
+ * ONLY this bot ID will be detected as giveaways.
+ * Any message not from this bot is ignored.
  */
-const KNOWN_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
-  '294882584201003009', // GiveawayBot
-  '739448630517039104', // GiveawayBoat
-  '515195524879237130',
-  '235148962103951360',
-  '282859044593598464',
-  '270904126974590976',
-  '508391840525975553',
+const ALLOWED_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
+  '530082442967646230', // The only bot we trust
 ]);
 
 /**
@@ -145,15 +139,15 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
-    // --- ONLY APPROVE FROM KNOWN GIVEAWAY BOTS ---
-    if (!this.isKnownGiveawayBot(message)) {
+    // --- ONLY APPROVE FROM THE SPECIFIC BOT ID ---
+    if (!this.isAllowedBot(message)) {
       return;
     }
 
     // --- BLOCK CONFIRMATION / DUPLICATE MESSAGES ---
     const content = message.content || '';
     if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
-      this.log.debug('Blocked message from known bot', {
+      this.log.debug('Blocked message from allowed bot', {
         component: 'GiveawayManager',
         account: this.accountLabel,
         botId: message.author?.id,
@@ -241,7 +235,7 @@ export class GiveawayManager extends EventEmitter {
     const prize = this.extractPrize(message);
     const endsAt = this.extractEndTimestamp(message);
 
-    this.log.debug('Giveaway detected from known bot', {
+    this.log.debug('Giveaway detected from allowed bot', {
       component: 'GiveawayManager',
       account: this.accountLabel,
       botId: message.author?.id,
@@ -289,11 +283,11 @@ export class GiveawayManager extends EventEmitter {
     return null;
   }
 
-  private isKnownGiveawayBot(message: Message): boolean {
+  private isAllowedBot(message: Message): boolean {
     return !!(
       message.author?.bot &&
       message.author.id &&
-      KNOWN_GIVEAWAY_BOT_IDS.has(message.author.id)
+      ALLOWED_GIVEAWAY_BOT_IDS.has(message.author.id)
     );
   }
 
