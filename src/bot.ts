@@ -20,6 +20,8 @@ import {
   ButtonStyle,
   Guild,
   GuildChannel,
+  ChannelType,
+  PermissionsBitField,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -129,7 +131,11 @@ commands.set('setchannel', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   const channel = interaction.options.getChannel('channel', true);
 
-  if (!channel.isTextBased()) {
+  // Check if it's a text channel using channel type
+  if (channel.type !== ChannelType.GuildText && 
+      channel.type !== ChannelType.GuildAnnouncement &&
+      channel.type !== ChannelType.GuildForum &&
+      channel.type !== ChannelType.GuildMedia) {
     await interaction.reply({ content: 'That is not a text channel.', ephemeral: true });
     return;
   }
@@ -227,7 +233,6 @@ export class BotManager {
 
   /**
    * Send a giveaway notification with Jimbo-style UI
-   * Includes: server logo, server name, live countdown, invite, message, jump
    */
   public async sendGiveawayNotification(data: GiveawayData): Promise<boolean> {
     const channelId = CONFIG.trackerChannelId;
@@ -253,11 +258,9 @@ export class BotManager {
     // Get invite
     const inviteUrl = await this.fetchServerInvite(guild, data.guildId);
 
-    // Extract winner count from prize (if any)
+    // Extract winner count from prize
     const winnerCount = this.extractWinnerCount(data.prize);
     const giveawayType = this.extractGiveawayType(data.prize);
-
-    // Calculate worth rating based on prize value or estimated worth
     const worthRating = this.calculateWorthRating(data);
 
     // Calculate live countdown
@@ -288,7 +291,7 @@ export class BotManager {
       })
       .setTimestamp();
 
-    // Build button row: Join | Message | Jump To Giveaway
+    // Build button row
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
@@ -306,7 +309,6 @@ export class BotManager {
       );
 
     try {
-      // Send with @everyone ping
       await channel.send({
         content: '@everyone',
         embeds: [embed],
@@ -334,7 +336,6 @@ export class BotManager {
    * Fetch or generate a server invite
    */
   private async fetchServerInvite(guild: Guild | undefined, guildId: string): Promise<string> {
-    // Check cache
     if (this.inviteCache.has(guildId)) {
       return this.inviteCache.get(guildId)!;
     }
@@ -344,7 +345,6 @@ export class BotManager {
     }
 
     try {
-      // Try to find an existing invite
       const invites = await guild.invites.fetch();
       const invite = invites.find(i => i.maxUses === 0 || i.maxUses === null);
 
@@ -354,9 +354,11 @@ export class BotManager {
         return url;
       }
 
-      // Try to create a new invite
+      // Find a channel to create invite
       const channel = guild.channels.cache.find(
-        (ch): ch is TextChannel => ch.isTextBased() && ch.permissionsFor(guild.members.me!)?.has('CreateInvite')
+        (ch): ch is TextChannel => 
+          ch.isTextBased() && 
+          ch.permissionsFor(guild.members.me!)?.has(PermissionsBitField.Flags.CreateInvite)
       );
 
       if (channel) {
@@ -380,28 +382,15 @@ export class BotManager {
     }
   }
 
-  /**
-   * Extract winner count from prize string
-   * Example: "UVSA Hat" → "1"
-   * Example: "5x Nitro" → "5"
-   */
   private extractWinnerCount(prize: string): string {
     const match = prize.match(/(\d+)\s*[xX×]/);
     if (match) return match[1];
-
-    // Check for common patterns
     if (/\b(?:one|1)\s*(?:winner|win|giveaway)/i.test(prize)) return '1';
-    if (/(\d+)\s*(?:winners?)/i.test(prize)) {
-      const m = prize.match(/(\d+)\s*(?:winners?)/i);
-      return m ? m[1] : '1';
-    }
-
+    const m = prize.match(/(\d+)\s*(?:winners?)/i);
+    if (m) return m[1];
     return '1';
   }
 
-  /**
-   * Extract giveaway type from prize
-   */
   private extractGiveawayType(prize: string): string {
     if (/nitro/i.test(prize)) return 'Nitro';
     if (/game|steam|epic/i.test(prize)) return 'Game';
@@ -413,27 +402,12 @@ export class BotManager {
     return 'Custom';
   }
 
-  /**
-   * Calculate worth rating (stars)
-   */
   private calculateWorthRating(data: GiveawayData): string {
     const prize = data.prize || '';
-
-    // Check for known high-value keywords
-    if (/nitro|month|year|premium|plus/i.test(prize)) {
-      return '★★★★★';
-    }
-    if (/game|steam|playstation|xbox|switch|code/i.test(prize)) {
-      return '★★★★☆';
-    }
-    if (/gift|card|voucher|discount/i.test(prize)) {
-      return '★★★☆☆';
-    }
-    if (/hat|skin|item|weapon|role|rank/i.test(prize)) {
-      return '★★☆☆☆';
-    }
-
-    // Check for numbers that might indicate value
+    if (/nitro|month|year|premium|plus/i.test(prize)) return '★★★★★';
+    if (/game|steam|playstation|xbox|switch|code/i.test(prize)) return '★★★★☆';
+    if (/gift|card|voucher|discount/i.test(prize)) return '★★★☆☆';
+    if (/hat|skin|item|weapon|role|rank/i.test(prize)) return '★★☆☆☆';
     const valueMatch = prize.match(/\$(\d+)/);
     if (valueMatch) {
       const value = parseInt(valueMatch[1]);
@@ -442,19 +416,12 @@ export class BotManager {
       if (value > 10) return '★★★☆☆';
       return '★★☆☆☆';
     }
-
     return '★★★★☆';
   }
 
-  /**
-   * Format countdown with live timer
-   * Returns: "Friday, 10 July 2026 at 06:22 pm (in 29 seconds)"
-   */
   private formatCountdown(endsAt: number): string {
     const now = Date.now();
     const diff = Math.max(0, endsAt - now);
-
-    // Format the date
     const date = new Date(endsAt);
     const options: Intl.DateTimeFormatOptions = {
       weekday: 'long',
@@ -466,21 +433,13 @@ export class BotManager {
       hour12: true,
     };
     const formattedDate = date.toLocaleString('en-US', options);
-
-    // Format time remaining
     const remaining = formatDuration(diff);
-
     return `${formattedDate} (in ${remaining})`;
   }
 
-  /**
-   * Get channel mention for the tracker channel
-   */
   public getTrackerChannelMention(): string {
     return `<#${CONFIG.trackerChannelId}>`;
   }
-
-  // ---- Slash command registration ----
 
   private async registerCommands(): Promise<void> {
     if (this.commandsRegistered) return;
