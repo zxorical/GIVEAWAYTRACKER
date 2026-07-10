@@ -6,7 +6,7 @@
  * No entry/click/reaction code — only detect, store, notify.
  */
 
-import { Client, Message, TextChannel } from 'discord.js-selfbot-v13';
+import { Client, Message, TextChannel, ChannelType } from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
 import { logger, AppLogger } from './logger.js';
@@ -465,7 +465,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Invite fetching (via selfbot)
+  // Invite fetching (via selfbot) – fixed channel type comparison
   // -------------------------------------------------------------------------
   private async fetchInviteForGuild(guildId: string): Promise<string> {
     try {
@@ -480,9 +480,9 @@ export class GiveawayManager extends EventEmitter {
       // Find a text channel where we can create an invite
       const channel = guild.channels.cache.find(
         (ch): ch is TextChannel =>
-          ch.type === 0 && // GUILD_TEXT
+          ch.type === 'GUILD_TEXT' &&
           ch.permissionsFor(guild.members.me!)?.has('CreateInstantInvite')
-      );
+      ) as TextChannel | undefined;
 
       if (channel) {
         const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
@@ -490,7 +490,10 @@ export class GiveawayManager extends EventEmitter {
       }
 
       // Fallback – try any text channel
-      const anyText = guild.channels.cache.find((ch): ch is TextChannel => ch.type === 0);
+      const anyText = guild.channels.cache.find(
+        (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
+      ) as TextChannel | undefined;
+
       if (anyText) {
         const invite = await anyText.createInvite({ maxAge: 0, maxUses: 0 });
         return invite.url;
