@@ -233,7 +233,7 @@ commands.set('help', async (interaction) => {
       { name: '📊 `/stats`', value: 'Show giveaway tracker statistics', inline: false },
       { name: '🎯 `/active`', value: 'List currently active giveaways', inline: false },
       { name: '📋 `/recent`', value: 'Show recent giveaways', inline: false },
-      { name: '🔍 `/status`', value: 'Show system status', inline: false },
+      { name: '🔍 `/status`', value: 'Show system status (Admin)', inline: false },
       { name: '⚙️ `/setchannel`', value: 'Set notification channel (Admin)', inline: false },
       { name: '🗑️ `/reset`', value: 'Reset database (Admin)', inline: false },
     )
@@ -377,13 +377,13 @@ export class BotManager {
       embed.setImage(guildBanner);
     }
 
-    // Add additional fields
+    // Add detection info field
     embed.addFields(
       { 
         name: '📊 Detection Info', 
         value: [
           `**Speed:** \`${detectionTime}ms\``,
-          `**Method:** \`${data.buttonCustomId ? 'Button' : 'Embed'}\``,
+          `**Method:** \`Embed Detection\``,
           `**Detected At:** ${formatTimestamp(data.detectedAt)}`,
         ].join('\n'),
         inline: false 
@@ -405,7 +405,6 @@ export class BotManager {
           .setLabel('🚀 Join Server')
           .setStyle(ButtonStyle.Link)
           .setURL(inviteUrl)
-          .setEmoji('🌟')
       );
     }
 
@@ -422,16 +421,14 @@ export class BotManager {
         .setLabel('💬 View Message')
         .setStyle(ButtonStyle.Link)
         .setURL(messageUrl)
-        .setEmoji('📨')
     );
 
-    // Jump to Giveaway button (duplicate for emphasis)
+    // Jump to Giveaway button
     row.addComponents(
       new ButtonBuilder()
         .setLabel('🎯 Jump to Giveaway')
         .setStyle(ButtonStyle.Link)
         .setURL(messageUrl)
-        .setEmoji('🏃')
     );
 
     // Send the notification
