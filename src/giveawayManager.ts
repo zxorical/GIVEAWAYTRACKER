@@ -21,7 +21,6 @@ import {
   GiveawayData,
   DetectionSource,
   DetectedGiveaway,
-  GiveawayStatus,
 } from './types.js';
 import {
   insertGiveaway,
@@ -336,10 +335,10 @@ export class GiveawayManager extends EventEmitter {
       return null;
     }
 
-    // Determine source: prefer button over reaction
+    // Determine source: prefer button over reaction; fallback to CONTENT
     let source = DetectionSource.CONTENT;
     if (signals.ENTRY_BUTTON) source = DetectionSource.COMPONENT;
-    else if (signals.ENTRY_REACTION) source = DetectionSource.REACTION;
+    // (no REACTION source in DetectionSource, so keep CONTENT)
 
     // Extract button customId if present
     const button = this.extractEntryButton(message);
@@ -349,7 +348,6 @@ export class GiveawayManager extends EventEmitter {
       source,
       endsAt,
       buttonCustomId: button?.customId,
-      score,
     };
   }
 
@@ -364,10 +362,7 @@ export class GiveawayManager extends EventEmitter {
     if (hasEntryButton) signals['ENTRY_BUTTON'] = GiveawaySignal.ENTRY_BUTTON;
 
     // --- Reaction detection (check first embed reaction suggestion) ---
-    // Many giveaway bots put a reaction emoji in the embed footer or description.
-    // We check for common emojis that are not part of a button.
     if (!hasEntryButton) {
-      // Only score if no button found, to avoid double points.
       const entryReaction = this.extractEntryReaction(message);
       if (entryReaction) {
         signals['ENTRY_REACTION'] = GiveawaySignal.ENTRY_REACTION;
@@ -487,14 +482,12 @@ export class GiveawayManager extends EventEmitter {
       .filter(Boolean)
       .join(' ');
 
-    // Find first occurrence of a known entry emoji in the text
     for (const emoji of ENTRY_EMOJI_PATTERNS) {
       if (text.includes(emoji)) {
         return { emoji };
       }
     }
 
-    // Also check if message has actual reactions already? Not needed.
     return null;
   }
 
@@ -549,7 +542,6 @@ export class GiveawayManager extends EventEmitter {
     ];
     const joined = texts.join(' ');
 
-    // Find all timestamps, pick the farthest in future (sometimes multiple)
     const matches = joined.matchAll(new RegExp(re.source, 'g'));
     let best: number | null = null;
     for (const match of matches) {
@@ -592,7 +584,7 @@ export class GiveawayManager extends EventEmitter {
     const fullData: GiveawayData = {
       ...data,
       id: undefined,
-      status: 'active' as GiveawayStatus,
+      status: 'active',         // plain string literal, compatible with GiveawayData
       notifiedAt: null,
       lastSeenAt: Date.now(),
     };
