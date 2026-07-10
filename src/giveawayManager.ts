@@ -472,7 +472,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Invite creation via Discord HTTP API (fixed)
+  // Invite creation via Discord HTTP API
   // -------------------------------------------------------------------------
   private async createDiscordInvite(channelId: string): Promise<string> {
     try {
@@ -485,13 +485,6 @@ export class GiveawayManager extends EventEmitter {
         unique: true,
       };
 
-      this.log.debug('Attempting to create invite via API', {
-        component: 'GiveawayManager',
-        account: this.accountLabel,
-        channelId,
-        tokenPreview: this.userToken.substring(0, 10) + '...',
-      });
-
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -503,120 +496,20 @@ export class GiveawayManager extends EventEmitter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        this.log.warn('Discord API invite creation failed', {
+        this.log.debug('Discord API invite creation failed', {
           component: 'GiveawayManager',
           channelId,
           status: response.status,
-          statusText: response.statusText,
-          error: errorText.substring(0, 200),
         });
         return 'Invite unavailable';
       }
 
       const data = await response.json() as { code: string };
-
-      this.log.info('Successfully created invite via API', {
-        component: 'GiveawayManager',
-        channelId,
-        code: data.code,
-      });
-
       return `https://discord.gg/${data.code}`;
     } catch (err) {
-      this.log.warn('Failed to create invite via API', {
+      this.log.debug('Failed to create invite via API', {
         component: 'GiveawayManager',
         channelId,
-        error: formatError(err),
-      });
-      return 'Invite unavailable';
-    }
-  }
-
-  private async fetchInviteForGuild(guildId: string): Promise<string> {
-    try {
-      const guild = this.client.guilds.cache.get(guildId);
-      if (!guild) {
-        this.log.debug('Guild not found in cache', {
-          component: 'GiveawayManager',
-          guildId,
-        });
-        return 'Server not reachable';
-      }
-
-      // First try existing permanent invites
-      try {
-        const invites = await guild.invites.fetch();
-        const permanent = invites?.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
-        if (permanent) {
-          this.log.debug('Using existing permanent invite', {
-            component: 'GiveawayManager',
-            guildId,
-            code: permanent.code,
-          });
-          return permanent.url;
-        }
-      } catch (fetchErr) {
-        this.log.debug('Could not fetch existing invites, will create new one', {
-          component: 'GiveawayManager',
-          guildId,
-          error: formatError(fetchErr),
-        });
-      }
-
-      // Find a text channel
-      const channel = guild.channels.cache.find(
-        (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
-      ) as TextChannel | undefined;
-
-      if (!channel) {
-        this.log.debug('No text channel found in guild', {
-          component: 'GiveawayManager',
-          guildId,
-          channelCount: guild.channels.cache.size,
-        });
-        return 'No text channel available';
-      }
-
-      // Try creating via HTTP API first
-      this.log.debug('Attempting to create invite via API for channel', {
-        component: 'GiveawayManager',
-        guildId,
-        channelId: channel.id,
-        channelName: channel.name,
-      });
-
-      const apiInvite = await this.createDiscordInvite(channel.id);
-      if (apiInvite !== 'Invite unavailable') {
-        return apiInvite;
-      }
-
-      // Fallback to library method
-      this.log.debug('API invite failed, trying library method', {
-        component: 'GiveawayManager',
-        guildId,
-        channelId: channel.id,
-      });
-
-      try {
-        const invite = await channel.createInvite({
-          maxAge: 0,
-          maxUses: 0,
-          reason: 'Giveaway tracker',
-        });
-        return invite.url;
-      } catch (libErr) {
-        this.log.warn('Library invite creation also failed', {
-          component: 'GiveawayManager',
-          guildId,
-          error: formatError(libErr),
-        });
-        return 'Invite unavailable';
-      }
-    } catch (err) {
-      this.log.warn('Failed to create invite for guild', {
-        component: 'GiveawayManager',
-        guildId,
         error: formatError(err),
       });
       return 'Invite unavailable';
@@ -624,7 +517,83 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification logic (now includes invite URL)
+  // Fetch invite with multiple fallback strategies
+  // -------------------------------------------------------------------------
+  private async fetchInviteForGuild(guildId: string): Promise<string> {
+    try {
+      const guild = this.client.guilds.cache.get(guildId);
+      if (!guild) {
+        return 'Server not reachable';
+      }
+
+      // Strategy 1: Try existing invites
+      try {
+        const invites = await guild.invites.fetch();
+        if (invites?.size > 0) {
+          const permanent = invites.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
+          if (permanent) return permanent.url;
+          return invites.first()!.url;
+        }
+      } catch {
+        this.log.debug('Could not fetch existing invites', { component: 'GiveawayManager', guildId });
+      }
+
+      // Strategy 2: Try vanity URL
+      try {
+        const vanityURL = (guild as any).vanityURLCode;
+        if (vanityURL) {
+          return `https://discord.gg/${vanityURL}`;
+        }
+      } catch {
+        this.log.debug('No vanity URL', { component: 'GiveawayManager', guildId });
+      }
+
+      // Strategy 3: Scan all text channels for invite permission
+      const channels = guild.channels.cache.filter(
+        (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
+      ) as unknown as TextChannel[];
+
+      for (const channel of channels.values()) {
+        try {
+          const perms = channel.permissionsFor(guild.members.me!);
+          if (perms?.has(Permissions.FLAGS.CREATE_INSTANT_INVITE)) {
+            // Try API first
+            const apiInvite = await this.createDiscordInvite(channel.id);
+            if (apiInvite !== 'Invite unavailable') return apiInvite;
+
+            // Try library method
+            const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
+            return invite.url;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      // Strategy 4: Try ANY text channel as last resort
+      for (const channel of channels.values()) {
+        try {
+          const apiInvite = await this.createDiscordInvite(channel.id);
+          if (apiInvite !== 'Invite unavailable') return apiInvite;
+        } catch {
+          continue;
+        }
+      }
+
+      // Absolute fallback
+      return `https://discord.com/channels/${guildId}`;
+    } catch (err) {
+      this.log.debug('Failed to get invite for guild', {
+        component: 'GiveawayManager',
+        guildId,
+        error: formatError(err),
+      });
+      return `https://discord.com/channels/${guildId}`;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Notification logic
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
@@ -637,20 +606,7 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
-    // Fetch invite using the selfbot
-    this.log.debug('Fetching invite for guild', {
-      component: 'GiveawayManager',
-      account: this.accountLabel,
-      guildId: data.guildId,
-    });
-
     const inviteUrl = await this.fetchInviteForGuild(data.guildId);
-
-    this.log.debug('Invite result', {
-      component: 'GiveawayManager',
-      guildId: data.guildId,
-      inviteUrl,
-    });
 
     const fullData: GiveawayData = {
       ...data,
