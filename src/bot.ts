@@ -48,7 +48,7 @@ function isAdmin(userId: string): boolean {
 
 async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>): Promise<boolean> {
   if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: '⛔ No permission.', ephemeral: true });
+    await interaction.reply({ content: 'No permission.', ephemeral: true });
     return false;
   }
   return true;
@@ -73,13 +73,13 @@ commands.set('stats', async (interaction) => {
   const stats = getStats();
 
   const embed = new EmbedBuilder()
-    .setColor(0x00AAFF)
-    .setTitle('📊 Tracker Stats')
+    .setColor(0x5865F2)
+    .setTitle('Tracker Stats')
     .addFields(
-      { name: '🎯 Total Detected', value: String(stats.totalDetected), inline: true },
-      { name: '🟢 Active', value: String(stats.activeGiveaways), inline: true },
-      { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
-      { name: '⏱️ Last Detection', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
+      { name: 'Detected', value: String(stats.totalDetected), inline: true },
+      { name: 'Active', value: String(stats.activeGiveaways), inline: true },
+      { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
+      { name: 'Last Seen', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
     )
     .setTimestamp();
 
@@ -91,20 +91,20 @@ commands.set('active', async (interaction) => {
   const active = getActiveGiveaways(10);
 
   if (active.length === 0) {
-    await interaction.editReply({ content: '🔍 Nothing active right now.' });
+    await interaction.editReply({ content: 'Nothing active right now.' });
     return;
   }
 
   const embed = new EmbedBuilder()
-    .setColor(0xFFD700)
-    .setTitle(`🎯 ${active.length} Active`)
+    .setColor(0x5865F2)
+    .setTitle(`${active.length} Active`)
     .setTimestamp();
 
   for (const g of active.slice(0, 10)) {
     const ends = g.endsAt ? `<t:${Math.floor(g.endsAt / 1000)}:R>` : 'Unknown';
     embed.addFields({
-      name: `🏆 ${truncate(g.prize, 50)}`,
-      value: `🏠 ${g.guildName} — 💬 #${g.channelName}\n⏳ Ends: ${ends}`,
+      name: truncate(g.prize, 50),
+      value: `${g.guildName} — #${g.channelName}\nEnds ${ends}`,
       inline: false,
     });
   }
@@ -117,19 +117,19 @@ commands.set('recent', async (interaction) => {
   const recent = getAllGiveaways(10);
 
   if (recent.length === 0) {
-    await interaction.editReply({ content: '📭 Nothing yet.' });
+    await interaction.editReply({ content: 'Nothing tracked yet.' });
     return;
   }
 
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
-    .setTitle('📋 Recent')
+    .setTitle('Recent')
     .setTimestamp();
 
   for (const g of recent) {
     embed.addFields({
-      name: `${g.status === 'active' ? '🟢' : '🔴'} ${truncate(g.prize, 40)}`,
-      value: `🏠 ${g.guildName}\n${formatTimestamp(g.detectedAt)}`,
+      name: truncate(g.prize, 40),
+      value: `${g.guildName} — ${g.status === 'active' ? 'Active' : 'Ended'}\n${formatTimestamp(g.detectedAt)}`,
       inline: false,
     });
   }
@@ -142,19 +142,19 @@ commands.set('setchannel', async (interaction) => {
   const channel = interaction.options.getChannel('channel', true);
 
   if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
-    await interaction.reply({ content: '❌ Pick a text channel.', ephemeral: true });
+    await interaction.reply({ content: 'Pick a text channel.', ephemeral: true });
     return;
   }
 
   (CONFIG as any).trackerChannelId = channel.id;
-  await interaction.reply({ content: `✅ Set to ${channel}`, ephemeral: true });
+  await interaction.reply({ content: `Set to ${channel}`, ephemeral: true });
 });
 
 commands.set('reset', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, true);
   resetDatabase();
-  await interaction.editReply({ content: '🗑️ Wiped.' });
+  await interaction.editReply({ content: 'Database wiped.' });
 });
 
 commands.set('status', async (interaction) => {
@@ -163,13 +163,13 @@ commands.set('status', async (interaction) => {
 
   const stats = getStats();
   const embed = new EmbedBuilder()
-    .setColor(0x00FF00)
-    .setTitle('🟢 Running')
+    .setColor(0x5865F2)
+    .setTitle('Running')
     .addFields(
-      { name: '📊 Total', value: String(stats.totalDetected), inline: true },
-      { name: '🟢 Active', value: String(stats.activeGiveaways), inline: true },
-      { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
-      { name: '📨 Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
+      { name: 'Total', value: String(stats.totalDetected), inline: true },
+      { name: 'Active', value: String(stats.activeGiveaways), inline: true },
+      { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
+      { name: 'Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
     )
     .setTimestamp();
 
@@ -179,16 +179,16 @@ commands.set('status', async (interaction) => {
 commands.set('help', async (interaction) => {
   await deferReply(interaction, false);
   const embed = new EmbedBuilder()
-    .setColor(0x9B59B6)
-    .setTitle('📚 Commands')
+    .setColor(0x5865F2)
+    .setTitle('Commands')
     .addFields(
-      { name: '📊 /stats', value: 'Detection stats', inline: false },
-      { name: '🎯 /active', value: 'Active giveaways', inline: false },
-      { name: '📋 /recent', value: 'Recent giveaways', inline: false },
-      { name: '🟢 /status', value: 'System status (admin)', inline: false },
-      { name: '⚙️ /setchannel', value: 'Set notify channel (admin)', inline: false },
-      { name: '🗑️ /reset', value: 'Clear database (admin)', inline: false },
-      { name: '🔔 /panel', value: 'Resend role panel (admin)', inline: false },
+      { name: '/stats', value: 'Detection stats', inline: false },
+      { name: '/active', value: 'Active giveaways', inline: false },
+      { name: '/recent', value: 'Recent giveaways', inline: false },
+      { name: '/status', value: 'System status', inline: false },
+      { name: '/setchannel', value: 'Notification channel', inline: false },
+      { name: '/reset', value: 'Clear database', inline: false },
+      { name: '/panel', value: 'Resend role panel', inline: false },
     )
     .setFooter({ text: 'made by gab' })
     .setTimestamp();
@@ -200,7 +200,7 @@ commands.set('panel', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, true);
   await sendRolePanel(interaction.client);
-  await interaction.editReply({ content: '✅ Panel sent.' });
+  await interaction.editReply({ content: 'Panel sent.' });
 });
 
 commands.set('purge', async (interaction) => {
@@ -217,14 +217,14 @@ commands.set('purge', async (interaction) => {
     const toDelete = botMessages.first(amount);
 
     if (toDelete.length === 0) {
-      await interaction.editReply({ content: '📭 Nothing to delete.' });
+      await interaction.editReply({ content: 'Nothing to delete.' });
       return;
     }
 
     await channel.bulkDelete(toDelete, true);
-    await interaction.editReply({ content: `🗑️ Deleted ${toDelete.length}.` });
+    await interaction.editReply({ content: `Deleted ${toDelete.length}.` });
   } catch {
-    await interaction.editReply({ content: '❌ Failed.' });
+    await interaction.editReply({ content: 'Failed.' });
   }
 });
 
@@ -233,7 +233,7 @@ commands.set('purge', async (interaction) => {
 // ---------------------------------------------------------------------------
 async function sendRolePanel(client: Client): Promise<void> {
   if (!PANEL_CHANNEL_ID) {
-    logger.warn('No panel channel set. Set PANEL_CHANNEL_ID in env.', { component: 'BotManager' });
+    logger.warn('No panel channel set.', { component: 'BotManager' });
     return;
   }
 
@@ -248,18 +248,15 @@ async function sendRolePanel(client: Client): Promise<void> {
     const oldPanel = messages.find(m =>
       m.author.id === client.user?.id &&
       m.embeds.length > 0 &&
-      m.embeds[0]?.title === '🔔 Giveaway Notifications'
+      m.embeds[0]?.title === 'Giveaway Pings'
     );
     if (oldPanel) await oldPanel.delete().catch(() => {});
   } catch {}
 
   const embed = new EmbedBuilder()
-    .setColor(0xF1C40F)
-    .setTitle('🔔 Giveaway Notifications')
-    .setDescription(
-      'Click the button to toggle giveaway pings.\n' +
-      'You\'ll get mentioned whenever a new giveaway is detected.'
-    )
+    .setColor(0x5865F2)
+    .setTitle('Giveaway Pings')
+    .setDescription('Click below to toggle giveaway notifications.')
     .setFooter({ text: 'Toggle anytime' });
 
   const row = new ActionRowBuilder<ButtonBuilder>()
@@ -281,19 +278,19 @@ async function sendRolePanel(client: Client): Promise<void> {
 
 async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
   if (!PING_ROLE_ID) {
-    await interaction.reply({ content: '❌ Ping role not configured.', ephemeral: true });
+    await interaction.reply({ content: 'Ping role not configured.', ephemeral: true });
     return;
   }
 
   const role = interaction.guild?.roles.cache.get(PING_ROLE_ID);
   if (!role) {
-    await interaction.reply({ content: '❌ Role not found.', ephemeral: true });
+    await interaction.reply({ content: 'Role not found.', ephemeral: true });
     return;
   }
 
   const member = interaction.member;
   if (!member || !('roles' in member)) {
-    await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+    await interaction.reply({ content: 'Something went wrong.', ephemeral: true });
     return;
   }
 
@@ -302,30 +299,25 @@ async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
   try {
     if (hasRole) {
       await (member.roles as any).remove(role);
-      await interaction.reply({ content: '🔕 Removed the role. You won\'t be pinged.', ephemeral: true });
+      await interaction.reply({ content: 'Removed the role. You won\'t be pinged.', ephemeral: true });
     } else {
       await (member.roles as any).add(role);
-      await interaction.reply({ content: '🔔 Added the role. You\'ll get pinged for giveaways!', ephemeral: true });
+      await interaction.reply({ content: 'Added the role. You\'ll get pinged for giveaways.', ephemeral: true });
     }
   } catch {
-    await interaction.reply({ content: '❌ Failed. Does the bot have Manage Roles permission?', ephemeral: true });
+    await interaction.reply({ content: 'Failed. Check bot permissions.', ephemeral: true });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Rich Presence Updater
+// Rich Presence
 // ---------------------------------------------------------------------------
 function updatePresence(client: Client): void {
   const stats = getStats();
   const total = stats.totalDetected || 0;
 
   client.user?.setPresence({
-    activities: [
-      {
-        name: `Tracked ${total} giveaways!`,
-        type: ActivityType.Watching,
-      },
-    ],
+    activities: [{ name: `${total} giveaways tracked`, type: ActivityType.Watching }],
     status: 'online',
   });
 }
@@ -352,7 +344,6 @@ export class BotManager {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
       updatePresence(this.client);
 
-      // Refresh presence every 30 seconds
       this.presenceInterval = setInterval(() => updatePresence(this.client), 30000);
 
       await this.registerCommands();
@@ -419,31 +410,20 @@ export class BotManager {
     const detectionTime = Date.now() - data.detectedAt;
     const endTimestamp = Math.floor(endsAt / 1000);
     const winnerCount = this.extractWinnerCount(data.prize);
-
     const pingMention = PING_ROLE_ID ? `<@&${PING_ROLE_ID}>` : '@everyone';
 
-    const description = [
-      `### 🎁 Details`,
-      `**🏠 Server:** ${guildName}`,
-      `**💬 Channel:** #${data.channelName}`,
-      `**👑 Winners:** ${winnerCount}`,
-      ``,
-      `### ⏰ Time`,
-      `**📅 Ends:** <t:${endTimestamp}:F>`,
-      `**⏳ Countdown:** <t:${endTimestamp}:R>`,
-      ``,
-      `### 🔗 Links`,
-      `**📨 Invite:** ${inviteUrl}`,
-      memberCount ? `**👥 Members:** ${memberCount.toLocaleString()}` : '',
-    ].filter(Boolean).join('\n');
-
     const embed = new EmbedBuilder()
-      .setAuthor({ name: '🎁 New Giveaway', iconURL: this.client.user?.displayAvatarURL() })
+      .setAuthor({ name: guildName, iconURL: guildIcon })
       .setTitle(data.prize || 'Unknown Prize')
-      .setDescription(description)
+      .setDescription(
+        `**Winners:** ${winnerCount}\n` +
+        `**Channel:** #${data.channelName}\n` +
+        `**Ends:** <t:${endTimestamp}:F> (<t:${endTimestamp}:R>)\n` +
+        (memberCount ? `**Members:** ${memberCount.toLocaleString()}\n` : '') +
+        `\n**Invite:** ${inviteUrl}`
+      )
       .setColor(0x5865F2)
-      .setThumbnail(guildIcon)
-      .setFooter({ text: `⚡ Detected in ${detectionTime}ms`, iconURL: this.client.user?.displayAvatarURL() })
+      .setFooter({ text: `${detectionTime}ms • ${pingMention}`, iconURL: this.client.user?.displayAvatarURL() })
       .setTimestamp(data.detectedAt);
 
     if (guildBanner) embed.setImage(guildBanner);
@@ -452,23 +432,16 @@ export class BotManager {
     const row = new ActionRowBuilder<ButtonBuilder>();
 
     if (inviteUrl.startsWith('http')) {
-      row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(inviteUrl).setEmoji('🚀'));
+      row.addComponents(new ButtonBuilder().setLabel('Join').setStyle(ButtonStyle.Link).setURL(inviteUrl));
     }
     row.addComponents(
-      new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl).setEmoji('💬'),
-      new ButtonBuilder().setLabel('Jump').setStyle(ButtonStyle.Link).setURL(messageUrl).setEmoji('🎯'),
+      new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl),
+      new ButtonBuilder().setLabel('Jump').setStyle(ButtonStyle.Link).setURL(messageUrl),
     );
 
     try {
-      await channel.send({
-        content: `🎉 ${pingMention} — **${guildName}** is hosting a giveaway`,
-        embeds: [embed],
-        components: [row],
-      });
-
-      // Update presence after a new detection
+      await channel.send({ embeds: [embed], components: [row] });
       updatePresence(this.client);
-
       logger.info(`Notification sent: ${data.messageId}`, { component: 'BotManager' });
       return true;
     } catch (err) {
@@ -495,17 +468,15 @@ export class BotManager {
       new SlashCommandBuilder().setName('recent').setDescription('Recently detected'),
       new SlashCommandBuilder()
         .setName('setchannel')
-        .setDescription('Set notification channel (admin)')
-        .addChannelOption(opt => opt.setName('channel').setDescription('Target channel').setRequired(true))
-        .setDefaultMemberPermissions(0),
-      new SlashCommandBuilder().setName('reset').setDescription('Wipe database (admin)').setDefaultMemberPermissions(0),
-      new SlashCommandBuilder().setName('status').setDescription('Check if running (admin)').setDefaultMemberPermissions(0),
-      new SlashCommandBuilder().setName('panel').setDescription('Resend the role panel (admin)').setDefaultMemberPermissions(0),
+        .setDescription('Set notification channel')
+        .addChannelOption(opt => opt.setName('channel').setDescription('Target channel').setRequired(true)),
+      new SlashCommandBuilder().setName('reset').setDescription('Wipe database'),
+      new SlashCommandBuilder().setName('status').setDescription('Check if running'),
+      new SlashCommandBuilder().setName('panel').setDescription('Resend the role panel'),
       new SlashCommandBuilder()
         .setName('purge')
-        .setDescription('Delete bot messages (admin)')
-        .addIntegerOption(opt => opt.setName('amount').setDescription('How many'))
-        .setDefaultMemberPermissions(0),
+        .setDescription('Delete bot messages')
+        .addIntegerOption(opt => opt.setName('amount').setDescription('How many')),
       new SlashCommandBuilder().setName('help').setDescription('List commands'),
     ];
 
