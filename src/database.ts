@@ -189,6 +189,22 @@ export function cleanupOldGiveaways(days: number = 30): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// NEW: Purge ended giveaways (auto‑cleanup)
+// ---------------------------------------------------------------------------
+export function purgeEndedGiveaways(): number {
+  loadDb();
+  const now = Date.now();
+  const before = data.length;
+  data = data.filter(d => d.status !== 'ended' && (d.endsAt === null || d.endsAt > now));
+  const removed = before - data.length;
+  if (removed > 0) {
+    saveDb();
+    logger.debug(`Purged ${removed} ended giveaways`, { component: 'Database' });
+  }
+  return removed;
+}
+
 export function closeDb(): void {
   if (data.length > 0) saveDb();
   logger.debug('Database closed', { component: 'Database' });
