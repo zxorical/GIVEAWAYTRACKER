@@ -26,7 +26,7 @@ interface StoredGiveaway {
 }
 
 // File path
-const DB_FILE = CONFIG.dbPath.replace('.db', '.json');
+const DB_FILE = CONFIG.dbPath;
 const DB_DIR = path.dirname(DB_FILE);
 
 // In-memory store
@@ -72,6 +72,12 @@ function saveDb(): void {
 }
 
 // ---- Public API ----
+
+export function getDb(): null {
+  // No-op for compatibility with index.ts
+  loadDb();
+  return null;
+}
 
 export function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): boolean {
   loadDb();
