@@ -20,6 +20,7 @@ import {
   Guild,
   ChannelType,
   ButtonInteraction,
+  ActivityType,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -312,11 +313,30 @@ async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Rich Presence Updater
+// ---------------------------------------------------------------------------
+function updatePresence(client: Client): void {
+  const stats = getStats();
+  const total = stats.totalDetected || 0;
+
+  client.user?.setPresence({
+    activities: [
+      {
+        name: `Tracked ${total} giveaways!`,
+        type: ActivityType.Watching,
+      },
+    ],
+    status: 'online',
+  });
+}
+
+// ---------------------------------------------------------------------------
 // BotManager
 // ---------------------------------------------------------------------------
 export class BotManager {
   private client: Client;
   private commandsRegistered = false;
+  private presenceInterval: NodeJS.Timeout | null = null;
 
   constructor(private readonly botToken: string) {
     this.client = new Client({
@@ -330,6 +350,11 @@ export class BotManager {
 
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
+      updatePresence(this.client);
+
+      // Refresh presence every 30 seconds
+      this.presenceInterval = setInterval(() => updatePresence(this.client), 30000);
+
       await this.registerCommands();
       await sendRolePanel(this.client);
     });
@@ -365,6 +390,7 @@ export class BotManager {
   }
 
   async destroy(): Promise<void> {
+    if (this.presenceInterval) clearInterval(this.presenceInterval);
     await this.client.destroy();
   }
 
@@ -439,6 +465,10 @@ export class BotManager {
         embeds: [embed],
         components: [row],
       });
+
+      // Update presence after a new detection
+      updatePresence(this.client);
+
       logger.info(`Notification sent: ${data.messageId}`, { component: 'BotManager' });
       return true;
     } catch (err) {
