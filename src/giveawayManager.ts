@@ -22,6 +22,7 @@ import {
   markNotified,
   updateLastSeen,
   getGiveaway,
+  markEnded,
 } from './database.js';
 import { BotManager } from './bot.js';
 
@@ -121,7 +122,7 @@ export class GiveawayManager extends EventEmitter {
 
       // If it's active and was notified, check if it's now ended
       if (existing.status === 'active' && this.isEnded(message)) {
-        this.markGiveawayEnded(message.id, message.channel.id);
+        markEnded(message.id, message.channel.id);
       }
       return;
     }
@@ -332,13 +333,6 @@ export class GiveawayManager extends EventEmitter {
     } else {
       this.stats.errors++;
     }
-  }
-
-  private markGiveawayEnded(messageId: string, channelId: string): void {
-    // Database markEnded function exists in database.ts
-    // We'll import it via require to avoid circular
-    const { markEnded } = require('./database.js');
-    markEnded(messageId, channelId);
   }
 
   // ---- Stats ----
