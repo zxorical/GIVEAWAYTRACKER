@@ -237,13 +237,15 @@ export class BotManager {
     const guild = this.client.guilds.cache.get(data.guildId);
     const guildName = guild?.name || data.guildName || 'Unknown Server';
     const serverIcon = guild?.iconURL({ size: 256 }) || null;
-    const inviteUrl = await this.fetchServerInvite(guild, data.guildId);
+    // Change 3: Updated call – only passing guild
+    const inviteUrl = await this.fetchServerInvite(guild);
 
     const winnerCount = this.extractWinnerCount(data.prize);
     const giveawayType = this.extractGiveawayType(data.prize);
     const worthRating = this.calculateWorthRating(data);
     const endsAt = data.endsAt || Date.now() + 3600000;
-    const countdownStr = this.formatCountdown(endsAt);
+    // Change 4: Discord's live countdown timestamps
+    const countdownStr = `<t:${Math.floor(endsAt / 1000)}:F> (<t:${Math.floor(endsAt / 1000)}:R>)`;
     const detectionTime = Date.now() - data.detectedAt;
 
     const embed = new EmbedBuilder()
@@ -261,8 +263,9 @@ export class BotManager {
       )
       .setColor(0x5865F2)
       .setThumbnail(serverIcon)
+      // Change 1: Footer from "Jimbo" to "Gab"
       .setFooter({
-        text: `Made by Jimbo • Detected in ${detectionTime}ms • ${formatTimestamp(Date.now())}`,
+        text: `Made by Gab • Detected in ${detectionTime}ms • ${formatTimestamp(Date.now())}`,
       })
       .setTimestamp();
 
@@ -275,7 +278,8 @@ export class BotManager {
         new ButtonBuilder()
           .setLabel('Message')
           .setStyle(ButtonStyle.Link)
-          .setURL(`https://discord.com/channels/@me/${data.authorId}`),
+          // Change 5: Fixed Message button URL
+          .setURL(`https://discord.com/channels/${data.guildId}/${data.channelId}/${data.messageId}`),
         new ButtonBuilder()
           .setLabel('Jump To Giveaway')
           .setStyle(ButtonStyle.Link)
@@ -306,52 +310,55 @@ export class BotManager {
     }
   }
 
-  private async fetchServerInvite(guild: Guild | undefined, guildId: string): Promise<string> {
-    if (this.inviteCache.has(guildId)) {
-      return this.inviteCache.get(guildId)!;
-    }
-
+  // Change 2: New fetchServerInvite method
+  private async fetchServerInvite(guild: Guild | undefined): Promise<string> {
     if (!guild) {
-      return `https://discord.gg/${guildId}`;
+      return 'No invite available';
     }
 
     try {
-      const invites = await guild.invites.fetch();
-      const invite = invites.find(i => i.maxUses === 0 || i.maxUses === null);
+      const existingInvites = await guild.invites.fetch().catch(() => null);
 
-      if (invite) {
-        const url = `https://discord.gg/${invite.code}`;
-        this.inviteCache.set(guildId, url);
-        return url;
+      const existing = existingInvites?.find(
+        invite => invite.maxAge === 0 && invite.maxUses === 0
+      );
+
+      if (existing) {
+        return existing.url;
       }
 
       const channel = guild.channels.cache.find(
-        (ch): ch is TextChannel => 
-          ch.isTextBased() && 
-          ch.permissionsFor(guild.members.me!)?.has(PermissionsBitField.Flags.CreateInstantInvite)
+        (ch): ch is TextChannel =>
+          ch.type === ChannelType.GuildText &&
+          ch.permissionsFor(guild.members.me!)?.has(
+            PermissionsBitField.Flags.CreateInstantInvite
+          ) === true
       );
 
-      if (channel) {
-        const newInvite = await channel.createInvite({
-          maxAge: 86400,
-          maxUses: 1,
-        });
-        const url = `https://discord.gg/${newInvite.code}`;
-        this.inviteCache.set(guildId, url);
-        return url;
+      if (!channel) {
+        return 'No invite permission';
       }
 
-      return `https://discord.gg/${guildId}`;
-    } catch (err) {
-      logger.debug('Failed to fetch/create invite', {
-        component: 'BotManager',
-        guildId,
-        error: formatError(err),
+      const invite = await channel.createInvite({
+        maxAge: 0,
+        maxUses: 0,
+        reason: 'Giveaway tracker invite'
       });
-      return `https://discord.gg/${guildId}`;
+
+      return invite.url;
+
+    } catch (err) {
+      logger.debug(
+        'Failed creating invite',
+        {
+          error: formatError(err)
+        }
+      );
+      return 'Invite unavailable';
     }
   }
 
+  // The following methods are kept for internal use / fallback
   private extractWinnerCount(prize: string): string {
     const match = prize.match(/(\d+)\s*[xX×]/);
     if (match) return match[1];
@@ -389,6 +396,7 @@ export class BotManager {
     return '★★★★☆';
   }
 
+  // This method is no longer used for notifications but kept for backward compatibility / other potential usage
   private formatCountdown(endsAt: number): string {
     const now = Date.now();
     const diff = Math.max(0, endsAt - now);
