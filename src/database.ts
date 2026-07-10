@@ -1,176 +1,166 @@
 /**
  * @module database
- * SQLite database layer — single file, simple and fast
+ * JSON file-based database — no compilation needed, works everywhere
  */
 
-import Database from 'better-sqlite3';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
 import { GiveawayData, GiveawayStats } from './types.js';
 
-let db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!db) {
-    const dir = path.dirname(CONFIG.dbPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    db = new Database(CONFIG.dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('foreign_keys = ON');
-
-    runMigrations(db);
-    logger.info(`SQLite database connected: ${CONFIG.dbPath}`, { component: 'Database' });
-  }
-  return db;
+interface StoredGiveaway {
+  id: number;
+  messageId: string;
+  channelId: string;
+  guildId: string;
+  guildName: string;
+  channelName: string;
+  authorId: string;
+  prize: string;
+  detectedAt: number;
+  endsAt: number | null;
+  status: 'active' | 'ended' | 'unknown';
+  notifiedAt: number | null;
+  lastSeenAt: number;
 }
 
-function runMigrations(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS giveaways (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      message_id TEXT NOT NULL,
-      channel_id TEXT NOT NULL,
-      guild_id TEXT NOT NULL,
-      guild_name TEXT NOT NULL,
-      channel_name TEXT NOT NULL,
-      author_id TEXT NOT NULL,
-      prize TEXT NOT NULL,
-      detected_at INTEGER NOT NULL,
-      ends_at INTEGER,
-      status TEXT NOT NULL DEFAULT 'active',
-      notified_at INTEGER,
-      last_seen_at INTEGER DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(message_id, channel_id)
-    );
+// File path
+const DB_FILE = CONFIG.dbPath.replace('.db', '.json');
+const DB_DIR = path.dirname(DB_FILE);
 
-    CREATE INDEX IF NOT EXISTS idx_giveaways_channel ON giveaways(channel_id);
-    CREATE INDEX IF NOT EXISTS idx_giveaways_guild ON giveaways(guild_id);
-    CREATE INDEX IF NOT EXISTS idx_giveaways_status ON giveaways(status);
-    CREATE INDEX IF NOT EXISTS idx_giveaways_detected ON giveaways(detected_at);
-  `);
+// In-memory store
+let data: StoredGiveaway[] = [];
+let nextId = 1;
+let loaded = false;
 
-  // Upgrade: add columns if missing
-  try {
-    db.exec(`ALTER TABLE giveaways ADD COLUMN notified_at INTEGER`);
-  } catch (_) {}
+// ---- Load/Save ----
+
+function loadDb(): void {
+  if (loaded) return;
+  loaded = true;
 
   try {
-    db.exec(`ALTER TABLE giveaways ADD COLUMN last_seen_at INTEGER DEFAULT CURRENT_TIMESTAMP`);
-  } catch (_) {}
+    if (fs.existsSync(DB_FILE)) {
+      const raw = fs.readFileSync(DB_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        data = parsed;
+        nextId = data.reduce((max, d) => Math.max(max, d.id || 0), 0) + 1;
+        logger.debug(`Loaded ${data.length} records from JSON DB`, { component: 'Database' });
+        return;
+      }
+    }
+  } catch (err) {
+    logger.warn('Failed to load JSON DB, starting fresh', { component: 'Database', error: String(err) });
+  }
 
-  logger.debug('Database migrations applied', { component: 'Database' });
+  data = [];
+  nextId = 1;
+  saveDb();
 }
 
-export function closeDb(): void {
-  if (db) {
-    db.close();
-    db = null;
-    logger.debug('Database closed', { component: 'Database' });
+function saveDb(): void {
+  try {
+    if (!fs.existsSync(DB_DIR)) {
+      fs.mkdirSync(DB_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    logger.error('Failed to save JSON DB', { component: 'Database', error: String(err) });
   }
 }
 
-// ---- CRUD operations ----
+// ---- Public API ----
 
-export function insertGiveaway(data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): boolean {
-  const db = getDb();
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO giveaways (
-      message_id, channel_id, guild_id, guild_name, channel_name,
-      author_id, prize, detected_at, ends_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+export function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): boolean {
+  loadDb();
 
-  const result = stmt.run(
-    data.messageId,
-    data.channelId,
-    data.guildId,
-    data.guildName,
-    data.channelName,
-    data.authorId,
-    data.prize,
-    data.detectedAt,
-    data.endsAt
-  );
+  const exists = data.some(d => d.messageId === g.messageId && d.channelId === g.channelId);
+  if (exists) return false;
 
-  return result.changes > 0;
+  data.push({
+    id: nextId++,
+    messageId: g.messageId,
+    channelId: g.channelId,
+    guildId: g.guildId,
+    guildName: g.guildName,
+    channelName: g.channelName,
+    authorId: g.authorId,
+    prize: g.prize,
+    detectedAt: g.detectedAt,
+    endsAt: g.endsAt ?? null,
+    status: 'active',
+    notifiedAt: null,
+    lastSeenAt: Date.now(),
+  });
+
+  saveDb();
+  return true;
 }
 
 export function wasNotifiedRecently(messageId: string, channelId: string, cooldownSeconds: number): boolean {
-  const db = getDb();
-  const cutoff = Date.now() - cooldownSeconds * 1000;
-  const stmt = db.prepare(`
-    SELECT notified_at FROM giveaways 
-    WHERE message_id = ? AND channel_id = ? AND notified_at IS NOT NULL
-  `);
-  const row = stmt.get(messageId, channelId) as { notified_at: number } | undefined;
-  return row !== undefined && row.notified_at > cutoff;
+  loadDb();
+  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (!entry || !entry.notifiedAt) return false;
+  return Date.now() - entry.notifiedAt < cooldownSeconds * 1000;
 }
 
 export function markNotified(messageId: string, channelId: string): void {
-  const db = getDb();
-  const stmt = db.prepare(`
-    UPDATE giveaways SET notified_at = ? WHERE message_id = ? AND channel_id = ?
-  `);
-  stmt.run(Date.now(), messageId, channelId);
+  loadDb();
+  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.notifiedAt = Date.now();
+    saveDb();
+  }
 }
 
 export function updateLastSeen(messageId: string, channelId: string): void {
-  const db = getDb();
-  const stmt = db.prepare(`
-    UPDATE giveaways SET last_seen_at = ? WHERE message_id = ? AND channel_id = ?
-  `);
-  stmt.run(Date.now(), messageId, channelId);
+  loadDb();
+  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.lastSeenAt = Date.now();
+    saveDb();
+  }
 }
 
 export function markEnded(messageId: string, channelId: string): void {
-  const db = getDb();
-  const stmt = db.prepare(`
-    UPDATE giveaways SET status = 'ended' WHERE message_id = ? AND channel_id = ?
-  `);
-  stmt.run(messageId, channelId);
+  loadDb();
+  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.status = 'ended';
+    saveDb();
+  }
 }
 
 export function getGiveaway(messageId: string, channelId: string): GiveawayData | null {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM giveaways WHERE message_id = ? AND channel_id = ?
-  `);
-  const row = stmt.get(messageId, channelId) as any;
-  if (!row) return null;
-  return rowToGiveaway(row);
+  loadDb();
+  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (!entry) return null;
+  return rowToGiveaway(entry);
 }
 
 export function getActiveGiveaways(limit: number = 50): GiveawayData[] {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM giveaways WHERE status = 'active' ORDER BY detected_at DESC LIMIT ?
-  `);
-  return stmt.all(limit).map(rowToGiveaway);
+  loadDb();
+  return data
+    .filter(d => d.status === 'active')
+    .slice(0, limit)
+    .map(rowToGiveaway);
 }
 
 export function getAllGiveaways(limit: number = 100): GiveawayData[] {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM giveaways ORDER BY detected_at DESC LIMIT ?
-  `);
-  return stmt.all(limit).map(rowToGiveaway);
+  loadDb();
+  return data
+    .slice(0, limit)
+    .map(rowToGiveaway);
 }
 
 export function getStats(): GiveawayStats {
-  const db = getDb();
-  const totalStmt = db.prepare(`SELECT COUNT(*) as count FROM giveaways`);
-  const activeStmt = db.prepare(`SELECT COUNT(*) as count FROM giveaways WHERE status = 'active'`);
-  const serversStmt = db.prepare(`SELECT COUNT(DISTINCT guild_id) as count FROM giveaways`);
-  const lastStmt = db.prepare(`SELECT MAX(detected_at) as last FROM giveaways`);
-
-  const total = (totalStmt.get() as any).count;
-  const active = (activeStmt.get() as any).count;
-  const servers = (serversStmt.get() as any).count || 0;
-  const last = (lastStmt.get() as any).last || null;
+  loadDb();
+  const total = data.length;
+  const active = data.filter(d => d.status === 'active').length;
+  const servers = new Set(data.map(d => d.guildId)).size;
+  const last = data.length > 0 ? data.reduce((max, d) => Math.max(max, d.detectedAt), 0) : null;
 
   return {
     totalDetected: total,
@@ -181,36 +171,46 @@ export function getStats(): GiveawayStats {
 }
 
 export function resetDatabase(): void {
-  const db = getDb();
-  const stmt = db.prepare(`DELETE FROM giveaways`);
-  const result = stmt.run();
-  logger.warn(`Database reset: ${result.changes} records deleted`, { component: 'Database' });
+  loadDb();
+  data = [];
+  nextId = 1;
+  saveDb();
+  logger.warn('Database reset', { component: 'Database' });
 }
 
 export function cleanupOldGiveaways(days: number = 30): void {
-  const db = getDb();
+  loadDb();
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const stmt = db.prepare(`DELETE FROM giveaways WHERE detected_at < ? AND status != 'active'`);
-  const result = stmt.run(cutoff);
-  if (result.changes > 0) {
-    logger.debug(`Cleaned up ${result.changes} old giveaways`, { component: 'Database' });
+  const before = data.length;
+  data = data.filter(d => d.status === 'active' || d.detectedAt >= cutoff);
+  const removed = before - data.length;
+  if (removed > 0) {
+    saveDb();
+    logger.debug(`Cleaned up ${removed} old giveaways`, { component: 'Database' });
   }
 }
 
-function rowToGiveaway(row: any): GiveawayData {
+export function closeDb(): void {
+  if (data.length > 0) saveDb();
+  logger.debug('Database closed', { component: 'Database' });
+}
+
+// ---- Helpers ----
+
+function rowToGiveaway(row: StoredGiveaway): GiveawayData {
   return {
     id: row.id,
-    messageId: row.message_id,
-    channelId: row.channel_id,
-    guildId: row.guild_id,
-    guildName: row.guild_name,
-    channelName: row.channel_name,
-    authorId: row.author_id,
+    messageId: row.messageId,
+    channelId: row.channelId,
+    guildId: row.guildId,
+    guildName: row.guildName,
+    channelName: row.channelName,
+    authorId: row.authorId,
     prize: row.prize,
-    detectedAt: row.detected_at,
-    endsAt: row.ends_at,
+    detectedAt: row.detectedAt,
+    endsAt: row.endsAt,
     status: row.status,
-    notifiedAt: row.notified_at,
-    lastSeenAt: row.last_seen_at,
+    notifiedAt: row.notifiedAt,
+    lastSeenAt: row.lastSeenAt,
   };
 }
