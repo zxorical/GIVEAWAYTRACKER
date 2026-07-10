@@ -1,6 +1,6 @@
 /**
  * @module bot
- * Notification bot and slash command handler
+ * Notification bot, slash commands, and giveaway ping role panel
  */
 
 import {
@@ -19,6 +19,7 @@ import {
   ButtonStyle,
   Guild,
   ChannelType,
+  ButtonInteraction,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -30,8 +31,12 @@ type CommandHandler = (interaction: ChatInputCommandInteraction<CacheType>) => P
 
 const commands = new Map<string, CommandHandler>();
 
+// From env — you set these in Render
+const PANEL_CHANNEL_ID = process.env.PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
+const PING_ROLE_ID = process.env.PING_ROLE_ID || '';
+
 // ---------------------------------------------------------------------------
-// Small helpers
+// Helpers
 // ---------------------------------------------------------------------------
 async function deferReply(interaction: ChatInputCommandInteraction<CacheType>, ephemeral = true) {
   await interaction.deferReply({ ephemeral });
@@ -43,7 +48,7 @@ function isAdmin(userId: string): boolean {
 
 async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>): Promise<boolean> {
   if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: '⛔ You don\'t have permission for that.', ephemeral: true });
+    await interaction.reply({ content: '⛔ No permission.', ephemeral: true });
     return false;
   }
   return true;
@@ -69,10 +74,10 @@ commands.set('stats', async (interaction) => {
 
   const embed = new EmbedBuilder()
     .setColor(0x00AAFF)
-    .setTitle('📊 Tracker Stats')
+    .setTitle('Tracker Stats')
     .addFields(
       { name: 'Total Detected', value: String(stats.totalDetected), inline: true },
-      { name: 'Active Right Now', value: String(stats.activeGiveaways), inline: true },
+      { name: 'Active', value: String(stats.activeGiveaways), inline: true },
       { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
       { name: 'Last Detection', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
     )
@@ -86,13 +91,13 @@ commands.set('active', async (interaction) => {
   const active = getActiveGiveaways(10);
 
   if (active.length === 0) {
-    await interaction.editReply({ content: 'Nothing active at the moment. Check /recent for past ones.' });
+    await interaction.editReply({ content: 'Nothing active right now.' });
     return;
   }
 
   const embed = new EmbedBuilder()
     .setColor(0xFFD700)
-    .setTitle(`🎯 ${active.length} Active Giveaway${active.length > 1 ? 's' : ''}`)
+    .setTitle(`${active.length} Active`)
     .setTimestamp();
 
   for (const g of active.slice(0, 10)) {
@@ -104,10 +109,6 @@ commands.set('active', async (interaction) => {
     });
   }
 
-  if (active.length > 10) {
-    embed.setFooter({ text: `+ ${active.length - 10} more not shown` });
-  }
-
   await interaction.editReply({ embeds: [embed] });
 });
 
@@ -116,19 +117,19 @@ commands.set('recent', async (interaction) => {
   const recent = getAllGiveaways(10);
 
   if (recent.length === 0) {
-    await interaction.editReply({ content: 'Nothing tracked yet. Once giveaways get detected they\'ll show up here.' });
+    await interaction.editReply({ content: 'Nothing yet.' });
     return;
   }
 
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
-    .setTitle(`📋 Last ${recent.length} Giveaway${recent.length > 1 ? 's' : ''}`)
+    .setTitle('Recent')
     .setTimestamp();
 
   for (const g of recent) {
     embed.addFields({
       name: truncate(g.prize, 40),
-      value: `${g.guildName} — ${g.status === 'active' ? '🟢 Active' : '🔴 Ended'}\n${formatTimestamp(g.detectedAt)}`,
+      value: `${g.guildName} — ${g.status === 'active' ? 'Active' : 'Ended'}\n${formatTimestamp(g.detectedAt)}`,
       inline: false,
     });
   }
@@ -140,20 +141,20 @@ commands.set('setchannel', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   const channel = interaction.options.getChannel('channel', true);
 
-  if (![ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia].includes(channel.type)) {
-    await interaction.reply({ content: 'That channel type won\'t work. Pick a text channel.', ephemeral: true });
+  if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
+    await interaction.reply({ content: 'Pick a text channel.', ephemeral: true });
     return;
   }
 
   (CONFIG as any).trackerChannelId = channel.id;
-  await interaction.reply({ content: `✅ Notifications will now go to ${channel}`, ephemeral: true });
+  await interaction.reply({ content: `Set to ${channel}`, ephemeral: true });
 });
 
 commands.set('reset', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, true);
   resetDatabase();
-  await interaction.editReply({ content: 'Database wiped. Fresh start.' });
+  await interaction.editReply({ content: 'Wiped.' });
 });
 
 commands.set('status', async (interaction) => {
@@ -163,12 +164,12 @@ commands.set('status', async (interaction) => {
   const stats = getStats();
   const embed = new EmbedBuilder()
     .setColor(0x00FF00)
-    .setTitle('🟢 Running')
+    .setTitle('Running')
     .addFields(
       { name: 'Total', value: String(stats.totalDetected), inline: true },
       { name: 'Active', value: String(stats.activeGiveaways), inline: true },
       { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
-      { name: 'Notifications', value: `<#${CONFIG.trackerChannelId}> — ${CONFIG.notificationCooldown}s cooldown`, inline: false },
+      { name: 'Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
     )
     .setTimestamp();
 
@@ -181,18 +182,136 @@ commands.set('help', async (interaction) => {
     .setColor(0x9B59B6)
     .setTitle('Commands')
     .addFields(
-      { name: '/stats', value: 'See overall detection stats', inline: false },
-      { name: '/active', value: 'Show currently running giveaways', inline: false },
-      { name: '/recent', value: 'Last few detected giveaways', inline: false },
-      { name: '/status', value: 'Check if everything\'s working (admin)', inline: false },
-      { name: '/setchannel', value: 'Where to send notifications (admin)', inline: false },
-      { name: '/reset', value: 'Clear the database (admin)', inline: false },
+      { name: '/stats', value: 'Detection stats', inline: false },
+      { name: '/active', value: 'Active giveaways', inline: false },
+      { name: '/recent', value: 'Recent giveaways', inline: false },
+      { name: '/status', value: 'System status (admin)', inline: false },
+      { name: '/setchannel', value: 'Set notify channel (admin)', inline: false },
+      { name: '/reset', value: 'Clear database (admin)', inline: false },
+      { name: '/panel', value: 'Resend role panel (admin)', inline: false },
     )
     .setFooter({ text: 'made by gab' })
     .setTimestamp();
 
   await interaction.editReply({ embeds: [embed] });
 });
+
+commands.set('panel', async (interaction) => {
+  if (!await requireAdmin(interaction)) return;
+  await deferReply(interaction, true);
+  await sendRolePanel(interaction.client);
+  await interaction.editReply({ content: 'Panel sent.' });
+});
+
+commands.set('purge', async (interaction) => {
+  if (!await requireAdmin(interaction)) return;
+  const amount = interaction.options.getInteger('amount') || 50;
+  await deferReply(interaction, true);
+
+  const channel = interaction.channel as TextChannel;
+  if (!channel) return;
+
+  try {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    const botMessages = messages.filter(m => m.author.id === interaction.client.user.id);
+    const toDelete = botMessages.first(amount);
+
+    if (toDelete.length === 0) {
+      await interaction.editReply({ content: 'Nothing to delete.' });
+      return;
+    }
+
+    await channel.bulkDelete(toDelete, true);
+    await interaction.editReply({ content: `Deleted ${toDelete.length}.` });
+  } catch {
+    await interaction.editReply({ content: 'Failed.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Role Panel
+// ---------------------------------------------------------------------------
+async function sendRolePanel(client: Client): Promise<void> {
+  if (!PANEL_CHANNEL_ID) {
+    logger.warn('No panel channel set. Set PANEL_CHANNEL_ID in env.', { component: 'BotManager' });
+    return;
+  }
+
+  const channel = client.channels.cache.get(PANEL_CHANNEL_ID) as TextChannel | undefined;
+  if (!channel) {
+    logger.error(`Panel channel ${PANEL_CHANNEL_ID} not found`, { component: 'BotManager' });
+    return;
+  }
+
+  // Delete old panel
+  try {
+    const messages = await channel.messages.fetch({ limit: 20 });
+    const oldPanel = messages.find(m =>
+      m.author.id === client.user?.id &&
+      m.embeds.length > 0 &&
+      m.embeds[0]?.title === 'Giveaway Notifications'
+    );
+    if (oldPanel) await oldPanel.delete().catch(() => {});
+  } catch {}
+
+  const embed = new EmbedBuilder()
+    .setColor(0xF1C40F)
+    .setTitle('Giveaway Notifications')
+    .setDescription(
+      'Click the button to toggle giveaway pings.\n' +
+      'You\'ll get mentioned whenever a new giveaway is detected.'
+    )
+    .setFooter({ text: 'Toggle anytime' });
+
+  const row = new ActionRowBuilder<ButtonBuilder>()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('toggle_ping')
+        .setLabel('Toggle Pings')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🔔')
+    );
+
+  try {
+    await channel.send({ embeds: [embed], components: [row] });
+    logger.info('Panel sent', { component: 'BotManager', channelId: channel.id });
+  } catch (err) {
+    logger.error('Failed to send panel', { component: 'BotManager', error: formatError(err) });
+  }
+}
+
+async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
+  if (!PING_ROLE_ID) {
+    await interaction.reply({ content: 'Ping role not configured.', ephemeral: true });
+    return;
+  }
+
+  const role = interaction.guild?.roles.cache.get(PING_ROLE_ID);
+  if (!role) {
+    await interaction.reply({ content: 'Role not found.', ephemeral: true });
+    return;
+  }
+
+  const member = interaction.member;
+  if (!member || !('roles' in member)) {
+    await interaction.reply({ content: 'Something went wrong.', ephemeral: true });
+    return;
+  }
+
+  const hasRole = (member.roles as any).cache?.has(role.id) ?? false;
+
+  try {
+    if (hasRole) {
+      await (member.roles as any).remove(role);
+      await interaction.reply({ content: 'Removed the role. You won\'t be pinged.', ephemeral: true });
+    } else {
+      await (member.roles as any).add(role);
+      await interaction.reply({ content: 'Added the role. You\'ll get pinged for giveaways!', ephemeral: true });
+    }
+  } catch {
+    await interaction.reply({ content: 'Failed. Does the bot have Manage Roles permission?', ephemeral: true });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // BotManager
@@ -211,12 +330,20 @@ export class BotManager {
       ],
     });
 
-    this.client.once('ready', () => {
+    this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
-      this.registerCommands().catch(err => logger.error('Command registration failed', { error: formatError(err) }));
+      await this.registerCommands();
+      await sendRolePanel(this.client);
     });
 
     this.client.on('interactionCreate', async (interaction: Interaction) => {
+      if (interaction.isButton()) {
+        if (interaction.customId === 'toggle_ping') {
+          await handlePingToggle(interaction);
+        }
+        return;
+      }
+
       if (!interaction.isChatInputCommand()) return;
       const handler = commands.get(interaction.commandName);
       if (!handler) {
@@ -244,7 +371,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Send a giveaway notification
+  // Notification
   // -------------------------------------------------------------------------
   public async sendGiveawayNotification(data: GiveawayData & { inviteUrl?: string }): Promise<boolean> {
     const channel = this.client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
@@ -254,7 +381,7 @@ export class BotManager {
     }
 
     const guild = this.client.guilds.cache.get(data.guildId);
-    const guildName = guild?.name || data.guildName || 'Unknown Server';
+    const guildName = guild?.name || data.guildName || 'Unknown';
     const guildIcon = guild?.iconURL({ size: 512 }) || null;
     const guildBanner = guild?.bannerURL({ size: 1024 }) || null;
     const memberCount = guild?.memberCount ?? null;
@@ -263,23 +390,25 @@ export class BotManager {
     const safeChannelId = isValidSnowflake(data.channelId) ? data.channelId : '0';
     const safeMessageId = isValidSnowflake(data.messageId) ? data.messageId : '0';
 
-    const inviteUrl = data.inviteUrl || 'No invite available';
+    const inviteUrl = data.inviteUrl || 'No invite';
     const endsAt = data.endsAt || Date.now() + 3600000;
     const detectionTime = Date.now() - data.detectedAt;
     const endTimestamp = Math.floor(endsAt / 1000);
     const winnerCount = this.extractWinnerCount(data.prize);
 
+    const pingMention = PING_ROLE_ID ? `<@&${PING_ROLE_ID}>` : '@everyone';
+
     const description = [
-      `### 📋 Details`,
+      `### Details`,
       `**Server:** ${guildName}`,
       `**Channel:** #${data.channelName}`,
       `**Winners:** ${winnerCount}`,
       ``,
-      `### ⏰ Time`,
+      `### Time`,
       `**Ends:** <t:${endTimestamp}:F>`,
       `**Countdown:** <t:${endTimestamp}:R>`,
       ``,
-      `### 🔗 Links`,
+      `### Links`,
       `**Invite:** ${inviteUrl}`,
       memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
@@ -308,11 +437,11 @@ export class BotManager {
 
     try {
       await channel.send({
-        content: `🎉 **@everyone** — **${guildName}** is hosting a giveaway`,
+        content: `🎉 ${pingMention} — **${guildName}** is hosting a giveaway`,
         embeds: [embed],
         components: [row],
       });
-      logger.info(`Notification sent: ${data.messageId}`, { component: 'BotManager', prize: truncate(data.prize, 50) });
+      logger.info(`Notification sent: ${data.messageId}`, { component: 'BotManager' });
       return true;
     } catch (err) {
       logger.error('Notification failed', { component: 'BotManager', error: formatError(err) });
@@ -329,9 +458,6 @@ export class BotManager {
     return '1';
   }
 
-  // -------------------------------------------------------------------------
-  // Slash command registration
-  // -------------------------------------------------------------------------
   private async registerCommands(): Promise<void> {
     if (this.commandsRegistered) return;
 
@@ -346,6 +472,12 @@ export class BotManager {
         .setDefaultMemberPermissions(0),
       new SlashCommandBuilder().setName('reset').setDescription('Wipe database (admin)').setDefaultMemberPermissions(0),
       new SlashCommandBuilder().setName('status').setDescription('Check if running (admin)').setDefaultMemberPermissions(0),
+      new SlashCommandBuilder().setName('panel').setDescription('Resend the role panel (admin)').setDefaultMemberPermissions(0),
+      new SlashCommandBuilder()
+        .setName('purge')
+        .setDescription('Delete bot messages (admin)')
+        .addIntegerOption(opt => opt.setName('amount').setDescription('How many'))
+        .setDefaultMemberPermissions(0),
       new SlashCommandBuilder().setName('help').setDescription('List commands'),
     ];
 
