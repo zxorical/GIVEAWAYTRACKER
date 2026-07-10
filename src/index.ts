@@ -10,7 +10,7 @@ import 'dotenv/config';
 
 import { CONFIG } from './config.js';
 import { logger, reconfigureLogger } from './logger.js';
-import { GiveawayManager } from './giveawayManager.js';
+import GiveawayManager from './giveawayManager.js';
 import { BotManager } from './bot.js';
 import { delay, formatError, formatDuration } from './utils.js';
 import { getDb, closeDb, cleanupOldGiveaways } from './database.js';
