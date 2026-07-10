@@ -74,7 +74,6 @@ function saveDb(): void {
 // ---- Public API ----
 
 export function getDb(): null {
-  // No-op for compatibility with index.ts
   loadDb();
   return null;
 }
