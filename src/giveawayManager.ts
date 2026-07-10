@@ -383,3 +383,4 @@ export class GiveawayManager extends EventEmitter {
 
 // ---- Export ----
 export { GiveawayManager };
+export default GiveawayManager;
