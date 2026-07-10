@@ -51,11 +51,6 @@ export function isValidSnowflake(id: string): boolean {
   return /^\d{17,19}$/.test(id);
 }
 
-// ---- ADDED: Missing exports ----
-
-/**
- * Check if text contains giveaway keywords
- */
 export function hasGiveawayKeyword(text: string): boolean {
   if (!text || text.length === 0) return false;
   const patterns = [
@@ -77,9 +72,6 @@ export function hasGiveawayKeyword(text: string): boolean {
   return patterns.some(re => re.test(text));
 }
 
-/**
- * Sanitize text for log output
- */
 export function sanitizeForLog(text: string): string {
   if (!text) return '';
   return text
