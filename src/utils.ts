@@ -50,3 +50,41 @@ export function extractInviteCode(text: string): string | null {
 export function isValidSnowflake(id: string): boolean {
   return /^\d{17,19}$/.test(id);
 }
+
+// ---- ADDED: Missing exports ----
+
+/**
+ * Check if text contains giveaway keywords
+ */
+export function hasGiveawayKeyword(text: string): boolean {
+  if (!text || text.length === 0) return false;
+  const patterns = [
+    /\bgiveaway\b/i,
+    /\bgive\s*away\b/i,
+    /\bgiveway\b/i,
+    /react\s+to\s+enter/i,
+    /enter\s+to\s+win/i,
+    /click\s+to\s+enter/i,
+    /press\s+to\s+enter/i,
+    /enter\s+the\s+giveaway/i,
+    /\braffle\b/i,
+    /\bsweepstakes\b/i,
+    /ends?\s+in\b/i,
+    /time\s+remaining/i,
+    /\bwinner\s+will\b/i,
+    /\bwinners?\s+chosen\b/i,
+  ];
+  return patterns.some(re => re.test(text));
+}
+
+/**
+ * Sanitize text for log output
+ */
+export function sanitizeForLog(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\p{Cc}/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
