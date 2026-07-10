@@ -1,6 +1,7 @@
 /**
  * @module giveawayManager
- * Pure giveaway detector — no entry code, just detection and notification
+ * Pure giveaway detector – no entry/click/reaction code.
+ * Detects giveaways, stores them in DB, and notifies via bot.
  */
 
 import { Client, Message } from 'discord.js-selfbot-v13';
@@ -25,6 +26,8 @@ import {
   markEnded,
 } from './database.js';
 import { BotManager } from './bot.js';
+
+// ─── Constants (same as old version) ────────────────────────────────────
 
 const KNOWN_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
   '294882584201003009',
@@ -71,6 +74,8 @@ const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
 const COMPONENT_RETRY_DELAY_MS = 300;
 const COMPONENT_RETRY_ATTEMPTS = 3;
 
+// ─── GiveawayManager ────────────────────────────────────────────────────
+
 export class GiveawayManager extends EventEmitter {
   private readonly client: Client;
   private readonly log: AppLogger;
@@ -98,6 +103,8 @@ export class GiveawayManager extends EventEmitter {
     this.accountLabel = accountLabel;
     this.botManager = botManager;
   }
+
+  // ─── Public API ──────────────────────────────────────────────────────
 
   public async handleMessage(message: Message): Promise<void> {
     if (!message.guild) return;
@@ -136,7 +143,7 @@ export class GiveawayManager extends EventEmitter {
 
     const inserted = insertGiveaway(data);
     if (!inserted) {
-      this.log.debug('Giveaway already in database', {
+      this.log.debug('Giveaway already in DB', {
         component: 'GiveawayManager',
         account: this.accountLabel,
         messageId: message.id,
@@ -158,6 +165,8 @@ export class GiveawayManager extends EventEmitter {
 
     await this.sendNotification(data);
   }
+
+  // ─── Detection ──────────────────────────────────────────────────────
 
   private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
     const content = message.content || '';
@@ -245,6 +254,8 @@ export class GiveawayManager extends EventEmitter {
     return texts.some(t => hasGiveawayKeyword(t));
   }
 
+  // ─── Text extraction ──────────────────────────────────────────────
+
   private extractPrize(message: Message): string {
     const embed = message.embeds?.[0];
     if (embed?.title) return this.cleanText(embed.title);
@@ -283,9 +294,11 @@ export class GiveawayManager extends EventEmitter {
     return truncate(sanitizeForLog(text), 200);
   }
 
+  // ─── Notification ─────────────────────────────────────────────────
+
   private async sendNotification(data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): Promise<void> {
     if (!this.botManager) {
-      this.log.warn('No bot manager available — notification not sent', {
+      this.log.warn('No bot manager – notification not sent', {
         component: 'GiveawayManager',
         account: this.accountLabel,
       });
@@ -316,6 +329,8 @@ export class GiveawayManager extends EventEmitter {
       this.stats.errors++;
     }
   }
+
+  // ─── Stats ─────────────────────────────────────────────────────────
 
   public getStats() {
     return {
