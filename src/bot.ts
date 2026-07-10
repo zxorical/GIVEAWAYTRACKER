@@ -1,6 +1,7 @@
 /**
  * @module bot
- * Notification bot, slash commands, and giveaway ping role panel
+ * Notification bot, slash commands, giveaway ping role panel
+ * + automatic cleanup of ended giveaways
  */
 
 import {
@@ -26,7 +27,13 @@ import { CONFIG } from './config.js';
 import { logger } from './logger.js';
 import { formatTimestamp, truncate, formatError } from './utils.js';
 import { GiveawayData } from './types.js';
-import { getStats, getActiveGiveaways, resetDatabase, getAllGiveaways } from './database.js';
+import {
+  getStats,
+  getActiveGiveaways,
+  resetDatabase,
+  getAllGiveaways,
+  purgeEndedGiveaways,   // <-- new import
+} from './database.js';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction<CacheType>) => Promise<void>;
 
@@ -326,12 +333,28 @@ function updatePresence(client: Client): void {
 }
 
 // ---------------------------------------------------------------------------
+// Auto‑cleanup (purge ended giveaways + update presence)
+// ---------------------------------------------------------------------------
+async function purgeAndUpdatePresence(client: Client): Promise<void> {
+  try {
+    const deleted = purgeEndedGiveaways();
+    if (deleted > 0) {
+      logger.info(`Purged ${deleted} ended giveaways`, { component: 'BotManager' });
+      updatePresence(client);
+    }
+  } catch (err) {
+    logger.error('Purge error', { component: 'BotManager', error: formatError(err) });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // BotManager
 // ---------------------------------------------------------------------------
 export class BotManager {
   private client: Client;
   private commandsRegistered = false;
   private presenceInterval: NodeJS.Timeout | null = null;
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(private readonly botToken: string) {
     this.client = new Client({
@@ -347,7 +370,12 @@ export class BotManager {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
       updatePresence(this.client);
 
-      this.presenceInterval = setInterval(() => updatePresence(this.client), 30000);
+      // Refresh presence every 30 seconds
+      this.presenceInterval = setInterval(() => updatePresence(this.client), 30_000);
+
+      // Purge ended giveaways immediately, then every 60 seconds
+      await purgeAndUpdatePresence(this.client);
+      this.cleanupInterval = setInterval(() => purgeAndUpdatePresence(this.client), 60_000);
 
       await this.registerCommands();
       await sendRolePanel(this.client);
@@ -385,6 +413,7 @@ export class BotManager {
 
   async destroy(): Promise<void> {
     if (this.presenceInterval) clearInterval(this.presenceInterval);
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
     await this.client.destroy();
   }
 
