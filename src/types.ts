@@ -27,10 +27,10 @@ export interface GiveawayData {
   prize: string;
   detectedAt: number;
   endsAt: number | null;
-  status: 'active' | 'ended' | 'unknown';
+  status: string; // 'active' | 'ended'
   notifiedAt: number | null;
   lastSeenAt: number;
-  inviteUrl?: string;
+  inviteUrl?: string; // <-- add this
 }
 
 export interface GiveawayStats {
