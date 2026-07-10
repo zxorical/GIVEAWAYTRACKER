@@ -6,7 +6,12 @@
  * No entry/click/reaction code — only detect, store, notify.
  */
 
-import { Client, Message, TextChannel, ChannelType } from 'discord.js-selfbot-v13';
+import {
+  Client,
+  Message,
+  TextChannel,
+  Permissions,
+} from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
 import { logger, AppLogger } from './logger.js';
@@ -465,7 +470,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Invite fetching (via selfbot) – fixed channel type comparison
+  // Invite fetching (via selfbot) – fixed permission flag
   // -------------------------------------------------------------------------
   private async fetchInviteForGuild(guildId: string): Promise<string> {
     try {
@@ -481,7 +486,7 @@ export class GiveawayManager extends EventEmitter {
       const channel = guild.channels.cache.find(
         (ch): ch is TextChannel =>
           ch.type === 'GUILD_TEXT' &&
-          ch.permissionsFor(guild.members.me!)?.has('CreateInstantInvite')
+          ch.permissionsFor(guild.members.me!)?.has(Permissions.FLAGS.CREATE_INSTANT_INVITE)
       ) as TextChannel | undefined;
 
       if (channel) {
