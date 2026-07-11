@@ -23,6 +23,7 @@ interface StoredGiveaway {
   status: 'active' | 'ended' | 'unknown';
   notifiedAt: number | null;
   lastSeenAt: number;
+  notificationMessageId?: string;
 }
 
 const DB_FILE = CONFIG.dbPath;
@@ -133,6 +134,16 @@ export function markEnded(messageId: string, channelId: string): void {
   }
 }
 
+export function setNotificationMessageId(giveawayMessageId: string, channelId: string, notificationMessageId: string): void {
+  loadDb();
+  const entry = data.find(d => d.messageId === giveawayMessageId && d.channelId === channelId);
+  if (entry) {
+    entry.notificationMessageId = notificationMessageId;
+    saveDb();
+    logger.debug(`Saved notification message ID: ${notificationMessageId} for giveaway: ${giveawayMessageId}`, { component: 'Database' });
+  }
+}
+
 export function getGiveaway(messageId: string, channelId: string): GiveawayData | null {
   loadDb();
   const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
@@ -193,34 +204,32 @@ export function cleanupOldGiveaways(days: number = 30): void {
 }
 
 // ---------------------------------------------------------------------------
-// FIXED: Purge ended giveaways — now catches everything expired
+// Purge ended giveaways — returns removed entries for bot.ts to edit messages
 // ---------------------------------------------------------------------------
-export function purgeEndedGiveaways(): number {
+export function purgeEndedGiveaways(): StoredGiveaway[] {
   loadDb();
   const now = Date.now();
-  const before = data.length;
+  const removed: StoredGiveaway[] = [];
 
-  // Keep only giveaways that are:
-  // 1. Status is 'active' AND
-  // 2. Either endsAt is null (no end time known) OR endsAt is still in the future
   data = data.filter(d => {
     const isActive = d.status === 'active';
     const hasNoEndTime = d.endsAt === null;
     const isStillRunning = d.endsAt !== null && d.endsAt > now;
     const keep = isActive && (hasNoEndTime || isStillRunning);
-    
+
     if (!keep) {
-      logger.debug(`Purging giveaway: ${d.messageId} (status: ${d.status}, endsAt: ${d.endsAt ? new Date(d.endsAt).toISOString() : 'null'}, now: ${new Date(now).toISOString()})`, { component: 'Database' });
+      removed.push({ ...d });
+      logger.debug(`Purging giveaway: ${d.messageId} (prize: ${d.prize?.substring(0, 30)})`, { component: 'Database' });
     }
-    
+
     return keep;
   });
 
-  const removed = before - data.length;
-  if (removed > 0) {
+  if (removed.length > 0) {
     saveDb();
-    logger.info(`Purged ${removed} expired/ended giveaways from database`, { component: 'Database' });
+    logger.info(`Purged ${removed.length} expired giveaways from database`, { component: 'Database' });
   }
+
   return removed;
 }
 
@@ -244,5 +253,6 @@ function rowToGiveaway(row: StoredGiveaway): GiveawayData {
     status: row.status,
     notifiedAt: row.notifiedAt,
     lastSeenAt: row.lastSeenAt,
+    notificationMessageId: row.notificationMessageId,
   };
 }
