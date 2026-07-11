@@ -30,7 +30,8 @@ export interface GiveawayData {
   status: string; // 'active' | 'ended'
   notifiedAt: number | null;
   lastSeenAt: number;
-  inviteUrl?: string; // <-- add this
+  inviteUrl?: string;
+  notificationMessageId?: string;
 }
 
 export interface GiveawayStats {
@@ -52,8 +53,6 @@ export interface DetectedGiveaway {
   endsAt: number | null;
   buttonCustomId?: string;
 }
-
-// ─── New: Clean message structure for detection ──────────────────────
 
 export interface GiveawayMessage {
   content?: string;
