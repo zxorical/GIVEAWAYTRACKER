@@ -129,6 +129,7 @@ export function markEnded(messageId: string, channelId: string): void {
   if (entry) {
     entry.status = 'ended';
     saveDb();
+    logger.debug(`Marked giveaway as ended: ${messageId}`, { component: 'Database' });
   }
 }
 
@@ -141,8 +142,9 @@ export function getGiveaway(messageId: string, channelId: string): GiveawayData 
 
 export function getActiveGiveaways(limit: number = 50): GiveawayData[] {
   loadDb();
+  const now = Date.now();
   return data
-    .filter(d => d.status === 'active')
+    .filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now))
     .slice(0, limit)
     .map(rowToGiveaway);
 }
@@ -156,8 +158,9 @@ export function getAllGiveaways(limit: number = 100): GiveawayData[] {
 
 export function getStats(): GiveawayStats {
   loadDb();
+  const now = Date.now();
   const total = data.length;
-  const active = data.filter(d => d.status === 'active').length;
+  const active = data.filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now)).length;
   const servers = new Set(data.map(d => d.guildId)).size;
   const last = data.length > 0 ? data.reduce((max, d) => Math.max(max, d.detectedAt), 0) : null;
 
@@ -190,17 +193,33 @@ export function cleanupOldGiveaways(days: number = 30): void {
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Purge ended giveaways (auto‑cleanup)
+// FIXED: Purge ended giveaways — now catches everything expired
 // ---------------------------------------------------------------------------
 export function purgeEndedGiveaways(): number {
   loadDb();
   const now = Date.now();
   const before = data.length;
-  data = data.filter(d => d.status !== 'ended' && (d.endsAt === null || d.endsAt > now));
+
+  // Keep only giveaways that are:
+  // 1. Status is 'active' AND
+  // 2. Either endsAt is null (no end time known) OR endsAt is still in the future
+  data = data.filter(d => {
+    const isActive = d.status === 'active';
+    const hasNoEndTime = d.endsAt === null;
+    const isStillRunning = d.endsAt !== null && d.endsAt > now;
+    const keep = isActive && (hasNoEndTime || isStillRunning);
+    
+    if (!keep) {
+      logger.debug(`Purging giveaway: ${d.messageId} (status: ${d.status}, endsAt: ${d.endsAt ? new Date(d.endsAt).toISOString() : 'null'}, now: ${new Date(now).toISOString()})`, { component: 'Database' });
+    }
+    
+    return keep;
+  });
+
   const removed = before - data.length;
   if (removed > 0) {
     saveDb();
-    logger.debug(`Purged ${removed} ended giveaways`, { component: 'Database' });
+    logger.info(`Purged ${removed} expired/ended giveaways from database`, { component: 'Database' });
   }
   return removed;
 }
