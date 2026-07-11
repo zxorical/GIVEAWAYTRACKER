@@ -1,7 +1,7 @@
 /**
  * @module bot
  * Notification bot, slash commands, giveaway ping role panel
- * + automatic cleanup of ended giveaways
+ * + auto cleanup: expired giveaways turn RED in Discord
  */
 
 import {
@@ -32,7 +32,8 @@ import {
   getActiveGiveaways,
   resetDatabase,
   getAllGiveaways,
-  purgeEndedGiveaways,   // <-- new import
+  purgeEndedGiveaways,
+  setNotificationMessageId,
 } from './database.js';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction<CacheType>) => Promise<void>;
@@ -333,13 +334,38 @@ function updatePresence(client: Client): void {
 }
 
 // ---------------------------------------------------------------------------
-// Auto‑cleanup (purge ended giveaways + update presence)
+// Auto‑cleanup: edits expired embeds to RED, then purges DB
 // ---------------------------------------------------------------------------
 async function purgeAndUpdatePresence(client: Client): Promise<void> {
   try {
-    const deleted = purgeEndedGiveaways();
-    if (deleted > 0) {
-      logger.info(`Purged ${deleted} ended giveaways`, { component: 'BotManager' });
+    const removed = purgeEndedGiveaways();
+
+    if (removed.length > 0) {
+      const trackerChannel = client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
+
+      for (const giveaway of removed) {
+        const notifMsgId = giveaway.notificationMessageId;
+        if (notifMsgId && trackerChannel) {
+          try {
+            const msg = await trackerChannel.messages.fetch(notifMsgId).catch(() => null);
+            if (msg && msg.embeds.length > 0) {
+              const oldEmbed = msg.embeds[0];
+              const updatedEmbed = EmbedBuilder.from(oldEmbed)
+                .setColor(0xFF0000)
+                .setAuthor({
+                  name: '🔴 Giveaway Ended',
+                  iconURL: oldEmbed.author?.iconURL || undefined,
+                });
+
+              await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
+              logger.debug(`Edited notification to red: ${notifMsgId}`, { component: 'BotManager' });
+            }
+          } catch {
+            // message might be gone, that's fine
+          }
+        }
+      }
+
       updatePresence(client);
     }
   } catch (err) {
@@ -370,10 +396,8 @@ export class BotManager {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
       updatePresence(this.client);
 
-      // Refresh presence every 30 seconds
       this.presenceInterval = setInterval(() => updatePresence(this.client), 30_000);
 
-      // Purge ended giveaways immediately, then every 60 seconds
       await purgeAndUpdatePresence(this.client);
       this.cleanupInterval = setInterval(() => purgeAndUpdatePresence(this.client), 60_000);
 
@@ -483,11 +507,14 @@ export class BotManager {
     );
 
     try {
-      await channel.send({
+      const sentMessage = await channel.send({
         content: pingMention,
         embeds: [embed],
         components: [row],
       });
+
+      // Save the notification message ID so we can turn it red later
+      setNotificationMessageId(data.messageId, data.channelId, sentMessage.id);
 
       updatePresence(this.client);
 
