@@ -92,7 +92,7 @@ const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
   /you\s+won/i,
   /you\s+did\s+not\s+win/i,
   /results\s+are\s+in/i,
-  /this\s+giveaway\s+is\s+now\s+closed/i,
+  /this\s+giveaway\s+is\+now\s+closed/i,
   /thank\s+you\s+for\s+participating/i,
 ];
 
@@ -354,9 +354,10 @@ export class GiveawayManager extends EventEmitter {
 
     for (const row of components) {
       const comps = row.components as any[] | undefined;
-      if (!comps) continue;
+      if (!comps?.length) continue;
 
       for (const comp of comps) {
+        // Must be a button (type 2) and not a link button (style 5)
         if (comp.type !== 2 || comp.style === 5 || comp.disabled === true) continue;
         const customId = comp.customId || comp.custom_id;
         if (!customId) continue;
@@ -521,7 +522,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification (FIXED: explicit string type for guildId)
+  // Notification
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
@@ -531,9 +532,12 @@ export class GiveawayManager extends EventEmitter {
     const guildId: string = data.guildId || '0';
     const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
 
+    // Generate a temporary ID for the notification; the database will have its own.
+    const tempId = `temp-${data.messageId}`;
+
     const fullData: GiveawayData = {
       ...data,
-      id: undefined,
+      id: tempId,
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
