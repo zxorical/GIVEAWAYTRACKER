@@ -2,6 +2,7 @@
  * @module bot
  * Notification bot, slash commands, giveaway ping role panel
  * + auto cleanup: expired giveaways turn RED in Discord
+ * + presence shows TOTAL giveaways ever tracked (including expired)
  */
 
 import {
@@ -29,6 +30,7 @@ import { formatTimestamp, truncate, formatError } from './utils.js';
 import { GiveawayData } from './types.js';
 import {
   getStats,
+  getTotalDetected,
   getActiveGiveaways,
   resetDatabase,
   getAllGiveaways,
@@ -79,13 +81,14 @@ function safeUrl(base: string, ...parts: string[]): string {
 commands.set('stats', async (interaction) => {
   await deferReply(interaction, false);
   const stats = getStats();
+  const totalEver = getTotalDetected();
 
   const embed = new EmbedBuilder()
     .setColor(0x00AAFF)
     .setTitle('📊 Tracker Stats')
     .addFields(
-      { name: '🎯 Total Detected', value: String(stats.totalDetected), inline: true },
-      { name: '🟢 Active', value: String(stats.activeGiveaways), inline: true },
+      { name: '📦 Total Ever Tracked', value: String(totalEver), inline: true },
+      { name: '🟢 Active Now', value: String(stats.activeGiveaways), inline: true },
       { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
       { name: '⏱️ Last Detection', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
     )
@@ -170,11 +173,12 @@ commands.set('status', async (interaction) => {
   await deferReply(interaction, false);
 
   const stats = getStats();
+  const totalEver = getTotalDetected();
   const embed = new EmbedBuilder()
     .setColor(0x00FF00)
     .setTitle('🟢 Running')
     .addFields(
-      { name: '📊 Total', value: String(stats.totalDetected), inline: true },
+      { name: '📦 Total Ever', value: String(totalEver), inline: true },
       { name: '🟢 Active', value: String(stats.activeGiveaways), inline: true },
       { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
       { name: '📨 Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
@@ -321,14 +325,13 @@ async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Rich Presence
+// Rich Presence — uses persistent total counter (includes expired)
 // ---------------------------------------------------------------------------
 function updatePresence(client: Client): void {
-  const stats = getStats();
-  const total = stats.totalDetected || 0;
+  const totalEver = getTotalDetected();
 
   client.user?.setPresence({
-    activities: [{ name: `Tracked ${total} giveaways!`, type: ActivityType.Watching }],
+    activities: [{ name: `${totalEver} giveaways tracked`, type: ActivityType.Watching }],
     status: 'online',
   });
 }
