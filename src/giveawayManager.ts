@@ -145,7 +145,10 @@ export class GiveawayManager extends EventEmitter {
   private readonly botManager: BotManager | null;
   private readonly userToken: string;
 
-  // Aggressive invite cache – re‑use for 30 minutes
+  // Prevent duplicate processing of the same message
+  private processingMessages = new Set<string>();
+
+  // Aggressive invite cache
   private inviteCache = new Map<string, { url: string; expiresAt: number }>();
   private pendingInvites = new Map<string, Promise<string>>();
 
@@ -177,7 +180,7 @@ export class GiveawayManager extends EventEmitter {
   // Public API
   // -------------------------------------------------------------------------
   public async handleMessage(message: Message): Promise<void> {
-    // Fast‑path guards (0ms)
+    // Fast‑path guards
     if (!message.guild) return;
     if (message.author?.id === this.client.user?.id) return;
 
@@ -190,7 +193,7 @@ export class GiveawayManager extends EventEmitter {
 
     if (!this.isAllowedBot(message)) return;
 
-    // Blocked content check (instant regex)
+    // Blocked content check
     const content = message.content || '';
     if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
       return;
@@ -203,52 +206,68 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    // Deduplication (sync)
-    const existing = getGiveaway(message.id, message.channel.id);
-    if (existing) {
-      updateLastSeen(message.id, message.channel.id);
-      if (existing.status === 'active' && this.isEnded(message)) {
-        markEnded(message.id, message.channel.id);
+    // Block duplicate processing (race condition fix)
+    const key = `${message.id}-${message.channel.id}`;
+    if (this.processingMessages.has(key)) {
+      this.log.debug('Skipping duplicate message processing', {
+        component: 'GiveawayManager',
+        account: this.accountLabel,
+        messageId: message.id,
+      });
+      return;
+    }
+    this.processingMessages.add(key);
+
+    try {
+      // Deduplication
+      const existing = getGiveaway(message.id, message.channel.id);
+      if (existing) {
+        updateLastSeen(message.id, message.channel.id);
+        if (existing.status === 'active' && this.isEnded(message)) {
+          markEnded(message.id, message.channel.id);
+        }
+        return;
       }
-      return;
+
+      // Detection
+      const detected = await this.detectGiveaway(message);
+      if (!detected) {
+        this.stats.falsePositivesBlocked++;
+        return;
+      }
+
+      // Store
+      const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
+        messageId: message.id,
+        channelId: message.channel.id,
+        guildId: message.guild.id,
+        guildName: message.guild.name,
+        channelName: (message.channel as any).name || 'unknown',
+        authorId: message.author?.id || '',
+        prize: detected.prize,
+        detectedAt: Date.now(),
+        endsAt: detected.endsAt,
+      };
+
+      const inserted = insertGiveaway(data);
+      if (!inserted) return;
+
+      this.stats.detected++;
+
+      if (wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
+        this.stats.skipped++;
+        return;
+      }
+
+      // Fire notification
+      this.sendNotification(data);
+    } finally {
+      this.processingMessages.delete(key);
     }
-
-    // Scoring + detection (sync + minimal async)
-    const detected = await this.detectGiveaway(message);
-    if (!detected) {
-      this.stats.falsePositivesBlocked++;
-      return;
-    }
-
-    // Store
-    const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
-      messageId: message.id,
-      channelId: message.channel.id,
-      guildId: message.guild.id,
-      guildName: message.guild.name,
-      channelName: (message.channel as any).name || 'unknown',
-      authorId: message.author?.id || '',
-      prize: detected.prize,
-      detectedAt: Date.now(),
-      endsAt: detected.endsAt,
-    };
-
-    const inserted = insertGiveaway(data);
-    if (!inserted) return;
-
-    this.stats.detected++;
-
-    if (wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
-      this.stats.skipped++;
-      return;
-    }
-
-    // Fire notification – invite is fetched async, NOT awaited here
-    this.sendNotification(data);
   }
 
   // -------------------------------------------------------------------------
-  // Detection (kept fast – only button retry may add ~300ms if needed)
+  // Detection
   // -------------------------------------------------------------------------
   private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
     const signals = await this.collectSignals(message);
@@ -310,13 +329,12 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Button detection (retry only if needed)
+  // Button detection
   // -------------------------------------------------------------------------
   private async hasEntryButton(message: Message): Promise<boolean> {
     const button = this.extractEntryButton(message);
     if (button) return true;
 
-    // Single retry only (reduced from 2)
     await delay(200);
     try {
       const refreshed = await message.fetch();
@@ -425,7 +443,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Cached invite (non‑blocking)
+  // Cached invite
   // -------------------------------------------------------------------------
   private getCachedInvite(guildId: string): string | null {
     const cached = this.inviteCache.get(guildId);
@@ -441,11 +459,9 @@ export class GiveawayManager extends EventEmitter {
   }
 
   private async fetchInviteForGuild(guildId: string): Promise<string> {
-    // Return cached immediately
     const cached = this.getCachedInvite(guildId);
     if (cached) return cached;
 
-    // Deduplicate in‑flight requests
     const pending = this.pendingInvites.get(guildId);
     if (pending) return pending;
 
@@ -468,7 +484,7 @@ export class GiveawayManager extends EventEmitter {
       const guild = this.client.guilds.cache.get(guildId);
       if (!guild) return 'Server not reachable';
 
-      // 1. Existing invites
+      // Existing invites
       try {
         const invites = await guild.invites.fetch();
         if (invites?.size > 0) {
@@ -477,13 +493,13 @@ export class GiveawayManager extends EventEmitter {
         }
       } catch {}
 
-      // 2. Vanity URL
+      // Vanity URL
       try {
         const vanity = (guild as any).vanityURLCode;
         if (vanity) return `https://discord.gg/${vanity}`;
       } catch {}
 
-      // 3. Create invite in first available channel
+      // Create invite in first available channel
       const channels = guild.channels.cache.filter(
         (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
       ) as unknown as TextChannel[];
@@ -504,14 +520,13 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification (non‑blocking – invite is fetched in background)
+  // Notification
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
     if (!this.botManager) return;
 
-    // 1. Send notification IMMEDIATELY with cached invite (or placeholder)
     const cachedInvite = this.getCachedInvite(data.guildId) || `https://discord.com/channels/${data.guildId}`;
 
     const fullData: GiveawayData = {
@@ -531,7 +546,7 @@ export class GiveawayManager extends EventEmitter {
       this.stats.errors++;
     }
 
-    // 2. Fetch real invite in background – will be cached for next time
+    // Fetch real invite in background for next time
     this.fetchInviteForGuild(data.guildId).catch(() => {});
   }
 
