@@ -1,6 +1,7 @@
 /**
  * @module database
  * JSON file-based database — no compilation needed
+ * Persistent total counter tracks ALL giveaways ever detected
  */
 
 import fs from 'fs';
@@ -28,15 +29,18 @@ interface StoredGiveaway {
 
 const DB_FILE = CONFIG.dbPath;
 const DB_DIR = path.dirname(DB_FILE);
+const COUNTER_FILE = path.join(DB_DIR, 'total_detected.json');
 
 let data: StoredGiveaway[] = [];
 let nextId = 1;
 let loaded = false;
+let totalDetectedCount = 0;
 
 function loadDb(): void {
   if (loaded) return;
   loaded = true;
 
+  // Load giveaway records
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = fs.readFileSync(DB_FILE, 'utf8');
@@ -45,16 +49,26 @@ function loadDb(): void {
         data = parsed;
         nextId = data.reduce((max, d) => Math.max(max, d.id || 0), 0) + 1;
         logger.debug(`Loaded ${data.length} records from JSON DB`, { component: 'Database' });
-        return;
       }
     }
   } catch (err) {
     logger.warn('Failed to load JSON DB, starting fresh', { component: 'Database', error: String(err) });
+    data = [];
+    nextId = 1;
   }
 
-  data = [];
-  nextId = 1;
-  saveDb();
+  // Load total counter
+  try {
+    if (fs.existsSync(COUNTER_FILE)) {
+      const raw = fs.readFileSync(COUNTER_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      totalDetectedCount = parsed.total || 0;
+      logger.debug(`Loaded total counter: ${totalDetectedCount}`, { component: 'Database' });
+    }
+  } catch {
+    totalDetectedCount = data.length;
+    logger.debug(`Counter file missing, using data length: ${totalDetectedCount}`, { component: 'Database' });
+  }
 }
 
 function saveDb(): void {
@@ -62,7 +76,10 @@ function saveDb(): void {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
     }
+    // Save giveaway records
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+    // Save total counter
+    fs.writeFileSync(COUNTER_FILE, JSON.stringify({ total: totalDetectedCount }));
   } catch (err) {
     logger.error('Failed to save JSON DB', { component: 'Database', error: String(err) });
   }
@@ -71,6 +88,11 @@ function saveDb(): void {
 export function getDb(): null {
   loadDb();
   return null;
+}
+
+export function getTotalDetected(): number {
+  loadDb();
+  return totalDetectedCount;
 }
 
 export function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): boolean {
@@ -95,7 +117,11 @@ export function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notified
     lastSeenAt: Date.now(),
   });
 
+  // Increment the persistent total counter
+  totalDetectedCount++;
+
   saveDb();
+  logger.debug(`Inserted giveaway. Total tracked: ${totalDetectedCount}`, { component: 'Database' });
   return true;
 }
 
@@ -170,7 +196,7 @@ export function getAllGiveaways(limit: number = 100): GiveawayData[] {
 export function getStats(): GiveawayStats {
   loadDb();
   const now = Date.now();
-  const total = data.length;
+  const total = totalDetectedCount;
   const active = data.filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now)).length;
   const servers = new Set(data.map(d => d.guildId)).size;
   const last = data.length > 0 ? data.reduce((max, d) => Math.max(max, d.detectedAt), 0) : null;
@@ -187,6 +213,7 @@ export function resetDatabase(): void {
   loadDb();
   data = [];
   nextId = 1;
+  totalDetectedCount = 0;
   saveDb();
   logger.warn('Database reset', { component: 'Database' });
 }
@@ -201,6 +228,7 @@ export function cleanupOldGiveaways(days: number = 30): void {
     saveDb();
     logger.debug(`Cleaned up ${removed} old giveaways`, { component: 'Database' });
   }
+  // Note: totalDetectedCount is NOT reduced — it stays as the all-time total
 }
 
 // ---------------------------------------------------------------------------
@@ -226,8 +254,9 @@ export function purgeEndedGiveaways(): StoredGiveaway[] {
   });
 
   if (removed.length > 0) {
+    // Note: totalDetectedCount is NOT reduced — it stays as the all-time total
     saveDb();
-    logger.info(`Purged ${removed.length} expired giveaways from database`, { component: 'Database' });
+    logger.info(`Purged ${removed.length} expired giveaways. Total tracked: ${totalDetectedCount}`, { component: 'Database' });
   }
 
   return removed;
