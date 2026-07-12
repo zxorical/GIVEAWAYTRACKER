@@ -1,6 +1,7 @@
 /**
  * @module database
- * MongoDB database — persistent cloud storage
+ * MongoDB database with in-memory cache for speed
+ * All reads are instant, writes sync to MongoDB in background
  */
 
 import { MongoClient, Db, Collection } from 'mongodb';
@@ -35,9 +36,17 @@ if (!MONGO_URI) {
 
 let client: MongoClient;
 let db: Db;
-let giveaways: Collection<StoredGiveaway>;
-let counters: Collection<TotalCounter>;
+let giveawaysCol: Collection<StoredGiveaway>;
+let countersCol: Collection<TotalCounter>;
 let connected = false;
+
+// In-memory cache — instant reads/writes
+let cache: StoredGiveaway[] = [];
+let totalDetectedCount = 0;
+
+// Sync queue
+let syncTimeout: NodeJS.Timeout | null = null;
+let dirtyTotal = false;
 
 async function connect(): Promise<void> {
   if (connected) return;
@@ -46,32 +55,22 @@ async function connect(): Promise<void> {
     client = new MongoClient(MONGO_URI!);
     await client.connect();
     db = client.db('giveaway_tracker');
-    giveaways = db.collection<StoredGiveaway>('giveaways');
-    counters = db.collection<TotalCounter>('counters');
+    giveawaysCol = db.collection<StoredGiveaway>('giveaways');
+    countersCol = db.collection<TotalCounter>('counters');
 
-    await giveaways.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
-    await giveaways.createIndex({ status: 1, endsAt: 1 });
-    await giveaways.createIndex({ detectedAt: -1 });
-
-    const existing = await counters.findOne({ _id: 'total_detected' });
-    if (!existing) {
-      await counters.insertOne({ _id: 'total_detected', total: 0 });
-      logger.info('Initialized total counter to 0', { component: 'Database' });
+    // Load existing data into cache
+    cache = await giveawaysCol.find({}).toArray();
+    
+    const counter = await countersCol.findOne({ _id: 'total_detected' });
+    if (!counter) {
+      await countersCol.insertOne({ _id: 'total_detected', total: cache.length });
+      totalDetectedCount = cache.length;
     } else {
-      logger.info(`Loaded total counter: ${existing.total}`, { component: 'Database' });
-    }
-
-    const count = await giveaways.countDocuments();
-    if (count > 0 && existing && existing.total < count) {
-      await counters.updateOne(
-        { _id: 'total_detected' },
-        { $set: { total: count } }
-      );
-      logger.info(`Corrected total counter to ${count}`, { component: 'Database' });
+      totalDetectedCount = Math.max(counter.total, cache.length);
     }
 
     connected = true;
-    logger.info('Connected to MongoDB', { component: 'Database' });
+    logger.info(`Connected to MongoDB. Cache loaded: ${cache.length} giveaways, ${totalDetectedCount} total`, { component: 'Database' });
   } catch (err) {
     logger.error('Failed to connect to MongoDB', { component: 'Database', error: String(err) });
     throw err;
@@ -82,202 +81,225 @@ async function ensureConnected(): Promise<void> {
   if (!connected) await connect();
 }
 
+function scheduleSync(): void {
+  if (syncTimeout) return;
+  syncTimeout = setTimeout(() => flushSync(), 2000);
+}
+
+async function flushSync(): Promise<void> {
+  syncTimeout = null;
+  if (!connected) return;
+
+  try {
+    if (dirtyTotal) {
+      await countersCol.updateOne(
+        { _id: 'total_detected' },
+        { $set: { total: totalDetectedCount } },
+        { upsert: true }
+      );
+      dirtyTotal = false;
+    }
+  } catch (err) {
+    logger.error('Failed to sync counter', { component: 'Database', error: String(err) });
+  }
+}
+
+async function syncGiveaway(doc: StoredGiveaway): Promise<void> {
+  if (!connected) return;
+  try {
+    await giveawaysCol.updateOne(
+      { messageId: doc.messageId, channelId: doc.channelId },
+      { $set: doc },
+      { upsert: true }
+    );
+  } catch (err) {
+    logger.error('Failed to sync giveaway', { component: 'Database', error: String(err) });
+  }
+}
+
+async function deleteFromMongo(messageId: string): Promise<void> {
+  if (!connected) return;
+  try {
+    await giveawaysCol.deleteOne({ messageId });
+  } catch (err) {
+    logger.error('Failed to delete from MongoDB', { component: 'Database', error: String(err) });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API — all instant from cache
+// ---------------------------------------------------------------------------
+
 export async function getDb(): Promise<Db> {
   await ensureConnected();
   return db;
 }
 
 export async function getTotalDetected(): Promise<number> {
-  await ensureConnected();
-  const counter = await counters.findOne({ _id: 'total_detected' });
-  return counter?.total || 0;
+  // Sync, no MongoDB call
+  return totalDetectedCount;
 }
 
 export async function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): Promise<boolean> {
-  await ensureConnected();
+  const exists = cache.some(d => d.messageId === g.messageId && d.channelId === g.channelId);
+  if (exists) return false;
 
-  try {
-    const doc: StoredGiveaway = {
-      messageId: g.messageId,
-      channelId: g.channelId,
-      guildId: g.guildId,
-      guildName: g.guildName,
-      channelName: g.channelName,
-      authorId: g.authorId,
-      prize: g.prize,
-      detectedAt: g.detectedAt,
-      endsAt: g.endsAt ?? null,
-      status: 'active',
-      notifiedAt: null,
-      lastSeenAt: Date.now(),
-    };
+  const doc: StoredGiveaway = {
+    messageId: g.messageId,
+    channelId: g.channelId,
+    guildId: g.guildId,
+    guildName: g.guildName,
+    channelName: g.channelName,
+    authorId: g.authorId,
+    prize: g.prize,
+    detectedAt: g.detectedAt,
+    endsAt: g.endsAt ?? null,
+    status: 'active',
+    notifiedAt: null,
+    lastSeenAt: Date.now(),
+  };
 
-    await giveaways.insertOne(doc);
-    await counters.updateOne(
-      { _id: 'total_detected' },
-      { $inc: { total: 1 } }
-    );
-    return true;
-  } catch (err: any) {
-    if (err.code === 11000) return false;
-    logger.error('Failed to insert giveaway', { component: 'Database', error: String(err) });
-    return false;
-  }
+  cache.push(doc);
+  totalDetectedCount++;
+  dirtyTotal = true;
+  scheduleSync();
+
+  // Sync to MongoDB in background
+  syncGiveaway(doc);
+
+  return true;
 }
 
 export async function wasNotifiedRecently(messageId: string, channelId: string, cooldownSeconds: number): Promise<boolean> {
-  await ensureConnected();
-  const entry = await giveaways.findOne({ messageId, channelId });
+  const entry = cache.find(d => d.messageId === messageId && d.channelId === channelId);
   if (!entry || !entry.notifiedAt) return false;
   return Date.now() - entry.notifiedAt < cooldownSeconds * 1000;
 }
 
 export async function markNotified(messageId: string, channelId: string): Promise<void> {
-  await ensureConnected();
-  await giveaways.updateOne(
-    { messageId, channelId },
-    { $set: { notifiedAt: Date.now() } }
-  );
+  const entry = cache.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.notifiedAt = Date.now();
+    scheduleSync();
+    syncGiveaway(entry);
+  }
 }
 
 export async function updateLastSeen(messageId: string, channelId: string): Promise<void> {
-  await ensureConnected();
-  await giveaways.updateOne(
-    { messageId, channelId },
-    { $set: { lastSeenAt: Date.now() } }
-  );
+  const entry = cache.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.lastSeenAt = Date.now();
+    scheduleSync();
+    syncGiveaway(entry);
+  }
 }
 
 export async function markEnded(messageId: string, channelId: string): Promise<void> {
-  await ensureConnected();
-  await giveaways.updateOne(
-    { messageId, channelId },
-    { $set: { status: 'ended' } }
-  );
+  const entry = cache.find(d => d.messageId === messageId && d.channelId === channelId);
+  if (entry) {
+    entry.status = 'ended';
+    scheduleSync();
+    syncGiveaway(entry);
+  }
 }
 
 export async function setNotificationMessageId(giveawayMessageId: string, channelId: string, notificationMessageId: string): Promise<void> {
-  await ensureConnected();
-  await giveaways.updateOne(
-    { messageId: giveawayMessageId, channelId },
-    { $set: { notificationMessageId } }
-  );
+  const entry = cache.find(d => d.messageId === giveawayMessageId && d.channelId === channelId);
+  if (entry) {
+    entry.notificationMessageId = notificationMessageId;
+    scheduleSync();
+    syncGiveaway(entry);
+  }
 }
 
 export async function getGiveaway(messageId: string, channelId: string): Promise<GiveawayData | null> {
-  await ensureConnected();
-  const entry = await giveaways.findOne({ messageId, channelId });
+  const entry = cache.find(d => d.messageId === messageId && d.channelId === channelId);
   if (!entry) return null;
   return rowToGiveaway(entry);
 }
 
 export async function getActiveGiveaways(limit: number = 50): Promise<GiveawayData[]> {
-  await ensureConnected();
   const now = Date.now();
-  const entries = await giveaways
-    .find({
-      status: 'active',
-      $or: [
-        { endsAt: null },
-        { endsAt: { $gt: now } },
-      ],
-    })
-    .sort({ detectedAt: -1 })
-    .limit(limit)
-    .toArray();
-  return entries.map(rowToGiveaway);
+  return cache
+    .filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now))
+    .sort((a, b) => b.detectedAt - a.detectedAt)
+    .slice(0, limit)
+    .map(rowToGiveaway);
 }
 
 export async function getAllGiveaways(limit: number = 100): Promise<GiveawayData[]> {
-  await ensureConnected();
-  const entries = await giveaways
-    .find({})
-    .sort({ detectedAt: -1 })
-    .limit(limit)
-    .toArray();
-  return entries.map(rowToGiveaway);
+  return cache
+    .sort((a, b) => b.detectedAt - a.detectedAt)
+    .slice(0, limit)
+    .map(rowToGiveaway);
 }
 
 export async function getStats(): Promise<GiveawayStats> {
-  await ensureConnected();
   const now = Date.now();
-  const counter = await counters.findOne({ _id: 'total_detected' });
-  const total = counter?.total || 0;
-
-  const active = await giveaways.countDocuments({
-    status: 'active',
-    $or: [
-      { endsAt: null },
-      { endsAt: { $gt: now } },
-    ],
-  });
-
-  const servers = await giveaways.distinct('guildId');
-  const lastEntry = await giveaways
-    .find({})
-    .sort({ detectedAt: -1 })
-    .limit(1)
-    .toArray();
-  const last = lastEntry.length > 0 ? lastEntry[0].detectedAt : null;
+  const active = cache.filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now)).length;
+  const servers = new Set(cache.map(d => d.guildId)).size;
+  const last = cache.length > 0 ? cache.reduce((max, d) => Math.max(max, d.detectedAt), 0) : null;
 
   return {
-    totalDetected: total,
+    totalDetected: totalDetectedCount,
     activeGiveaways: active,
-    serversWithGiveaways: servers.length,
+    serversWithGiveaways: servers,
     lastDetected: last,
   };
 }
 
 export async function resetDatabase(): Promise<void> {
-  await ensureConnected();
-  await giveaways.deleteMany({});
-  await counters.updateOne(
-    { _id: 'total_detected' },
-    { $set: { total: 0 } }
-  );
+  cache = [];
+  totalDetectedCount = 0;
+  dirtyTotal = true;
+  scheduleSync();
+  
+  if (connected) {
+    await giveawaysCol.deleteMany({});
+    await countersCol.updateOne({ _id: 'total_detected' }, { $set: { total: 0 } });
+  }
+  
   logger.warn('Database reset', { component: 'Database' });
 }
 
 export async function cleanupOldGiveaways(days: number = 30): Promise<void> {
-  await ensureConnected();
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const result = await giveaways.deleteMany({
-    status: { $ne: 'active' },
-    detectedAt: { $lt: cutoff },
-  });
-  if (result.deletedCount > 0) {
-    logger.debug(`Cleaned up ${result.deletedCount} old giveaways`, { component: 'Database' });
-  }
+  cache = cache.filter(d => d.status === 'active' || d.detectedAt >= cutoff);
 }
 
 export async function purgeEndedGiveaways(): Promise<StoredGiveaway[]> {
-  await ensureConnected();
   const now = Date.now();
+  const removed: StoredGiveaway[] = [];
 
-  const toRemove = await giveaways
-    .find({
-      $or: [
-        { status: 'ended' },
-        { status: 'active', endsAt: { $ne: null, $lte: now } },
-        { status: { $nin: ['active', 'ended'] } },
-      ],
-    })
-    .toArray();
+  cache = cache.filter(d => {
+    const isActive = d.status === 'active';
+    const hasNoEndTime = d.endsAt === null;
+    const isStillRunning = d.endsAt !== null && d.endsAt > now;
+    const keep = isActive && (hasNoEndTime || isStillRunning);
 
-  if (toRemove.length > 0) {
-    const ids = toRemove.map(g => g.messageId);
-    await giveaways.deleteMany({ messageId: { $in: ids } });
-    logger.info(`Purged ${toRemove.length} expired giveaways`, { component: 'Database' });
+    if (!keep) {
+      removed.push({ ...d });
+      deleteFromMongo(d.messageId);
+    }
+
+    return keep;
+  });
+
+  if (removed.length > 0) {
+    logger.info(`Purged ${removed.length} expired giveaways`, { component: 'Database' });
   }
 
-  return toRemove;
+  return removed;
 }
 
 export async function closeDb(): Promise<void> {
+  if (syncTimeout) {
+    clearTimeout(syncTimeout);
+    await flushSync();
+  }
   if (client) {
     await client.close();
     connected = false;
-    logger.debug('Database connection closed', { component: 'Database' });
   }
 }
 
