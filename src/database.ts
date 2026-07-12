@@ -1,17 +1,13 @@
 /**
  * @module database
- * JSON file-based database — no compilation needed
- * Persistent total counter tracks ALL giveaways ever detected
+ * MongoDB database — persistent cloud storage
  */
 
-import fs from 'fs';
-import path from 'path';
-import { CONFIG } from './config.js';
+import { MongoClient, Db, Collection } from 'mongodb';
 import { logger } from './logger.js';
 import { GiveawayData, GiveawayStats } from './types.js';
 
 interface StoredGiveaway {
-  id: number;
   messageId: string;
   channelId: string;
   guildId: string;
@@ -27,249 +23,266 @@ interface StoredGiveaway {
   notificationMessageId?: string;
 }
 
-const DB_FILE = CONFIG.dbPath;
-const DB_DIR = path.dirname(DB_FILE);
-const COUNTER_FILE = path.join(DB_DIR, 'total_detected.json');
+interface TotalCounter {
+  _id: string;
+  total: number;
+}
 
-let data: StoredGiveaway[] = [];
-let nextId = 1;
-let loaded = false;
-let totalDetectedCount = 0;
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  throw new Error('MONGO_URI environment variable is required');
+}
 
-function loadDb(): void {
-  if (loaded) return;
-  loaded = true;
+let client: MongoClient;
+let db: Db;
+let giveaways: Collection<StoredGiveaway>;
+let counters: Collection<TotalCounter>;
+let connected = false;
 
-  // Load giveaway records
+async function connect(): Promise<void> {
+  if (connected) return;
+
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        data = parsed;
-        nextId = data.reduce((max, d) => Math.max(max, d.id || 0), 0) + 1;
-        logger.debug(`Loaded ${data.length} records from JSON DB`, { component: 'Database' });
-      }
+    client = new MongoClient(MONGO_URI!);
+    await client.connect();
+    db = client.db('giveaway_tracker');
+    giveaways = db.collection<StoredGiveaway>('giveaways');
+    counters = db.collection<TotalCounter>('counters');
+
+    await giveaways.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
+    await giveaways.createIndex({ status: 1, endsAt: 1 });
+    await giveaways.createIndex({ detectedAt: -1 });
+
+    const existing = await counters.findOne({ _id: 'total_detected' });
+    if (!existing) {
+      await counters.insertOne({ _id: 'total_detected', total: 0 });
+      logger.info('Initialized total counter to 0', { component: 'Database' });
+    } else {
+      logger.info(`Loaded total counter: ${existing.total}`, { component: 'Database' });
     }
+
+    const count = await giveaways.countDocuments();
+    if (count > 0 && existing && existing.total < count) {
+      await counters.updateOne(
+        { _id: 'total_detected' },
+        { $set: { total: count } }
+      );
+      logger.info(`Corrected total counter to ${count}`, { component: 'Database' });
+    }
+
+    connected = true;
+    logger.info('Connected to MongoDB', { component: 'Database' });
   } catch (err) {
-    logger.warn('Failed to load JSON DB, starting fresh', { component: 'Database', error: String(err) });
-    data = [];
-    nextId = 1;
+    logger.error('Failed to connect to MongoDB', { component: 'Database', error: String(err) });
+    throw err;
   }
+}
 
-  // Load total counter
+async function ensureConnected(): Promise<void> {
+  if (!connected) await connect();
+}
+
+export async function getDb(): Promise<Db> {
+  await ensureConnected();
+  return db;
+}
+
+export async function getTotalDetected(): Promise<number> {
+  await ensureConnected();
+  const counter = await counters.findOne({ _id: 'total_detected' });
+  return counter?.total || 0;
+}
+
+export async function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): Promise<boolean> {
+  await ensureConnected();
+
   try {
-    if (fs.existsSync(COUNTER_FILE)) {
-      const raw = fs.readFileSync(COUNTER_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      totalDetectedCount = parsed.total || 0;
-      logger.debug(`Loaded total counter: ${totalDetectedCount}`, { component: 'Database' });
-    }
-  } catch {
-    totalDetectedCount = data.length;
-    logger.debug(`Counter file missing, using data length: ${totalDetectedCount}`, { component: 'Database' });
+    const doc: StoredGiveaway = {
+      messageId: g.messageId,
+      channelId: g.channelId,
+      guildId: g.guildId,
+      guildName: g.guildName,
+      channelName: g.channelName,
+      authorId: g.authorId,
+      prize: g.prize,
+      detectedAt: g.detectedAt,
+      endsAt: g.endsAt ?? null,
+      status: 'active',
+      notifiedAt: null,
+      lastSeenAt: Date.now(),
+    };
+
+    await giveaways.insertOne(doc);
+    await counters.updateOne(
+      { _id: 'total_detected' },
+      { $inc: { total: 1 } }
+    );
+    return true;
+  } catch (err: any) {
+    if (err.code === 11000) return false;
+    logger.error('Failed to insert giveaway', { component: 'Database', error: String(err) });
+    return false;
   }
 }
 
-function saveDb(): void {
-  try {
-    if (!fs.existsSync(DB_DIR)) {
-      fs.mkdirSync(DB_DIR, { recursive: true });
-    }
-    // Save giveaway records
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-    // Save total counter
-    fs.writeFileSync(COUNTER_FILE, JSON.stringify({ total: totalDetectedCount }));
-  } catch (err) {
-    logger.error('Failed to save JSON DB', { component: 'Database', error: String(err) });
-  }
-}
-
-export function getDb(): null {
-  loadDb();
-  return null;
-}
-
-export function getTotalDetected(): number {
-  loadDb();
-  return totalDetectedCount;
-}
-
-export function insertGiveaway(g: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): boolean {
-  loadDb();
-
-  const exists = data.some(d => d.messageId === g.messageId && d.channelId === g.channelId);
-  if (exists) return false;
-
-  data.push({
-    id: nextId++,
-    messageId: g.messageId,
-    channelId: g.channelId,
-    guildId: g.guildId,
-    guildName: g.guildName,
-    channelName: g.channelName,
-    authorId: g.authorId,
-    prize: g.prize,
-    detectedAt: g.detectedAt,
-    endsAt: g.endsAt ?? null,
-    status: 'active',
-    notifiedAt: null,
-    lastSeenAt: Date.now(),
-  });
-
-  // Increment the persistent total counter
-  totalDetectedCount++;
-
-  saveDb();
-  logger.debug(`Inserted giveaway. Total tracked: ${totalDetectedCount}`, { component: 'Database' });
-  return true;
-}
-
-export function wasNotifiedRecently(messageId: string, channelId: string, cooldownSeconds: number): boolean {
-  loadDb();
-  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+export async function wasNotifiedRecently(messageId: string, channelId: string, cooldownSeconds: number): Promise<boolean> {
+  await ensureConnected();
+  const entry = await giveaways.findOne({ messageId, channelId });
   if (!entry || !entry.notifiedAt) return false;
   return Date.now() - entry.notifiedAt < cooldownSeconds * 1000;
 }
 
-export function markNotified(messageId: string, channelId: string): void {
-  loadDb();
-  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
-  if (entry) {
-    entry.notifiedAt = Date.now();
-    saveDb();
-  }
+export async function markNotified(messageId: string, channelId: string): Promise<void> {
+  await ensureConnected();
+  await giveaways.updateOne(
+    { messageId, channelId },
+    { $set: { notifiedAt: Date.now() } }
+  );
 }
 
-export function updateLastSeen(messageId: string, channelId: string): void {
-  loadDb();
-  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
-  if (entry) {
-    entry.lastSeenAt = Date.now();
-    saveDb();
-  }
+export async function updateLastSeen(messageId: string, channelId: string): Promise<void> {
+  await ensureConnected();
+  await giveaways.updateOne(
+    { messageId, channelId },
+    { $set: { lastSeenAt: Date.now() } }
+  );
 }
 
-export function markEnded(messageId: string, channelId: string): void {
-  loadDb();
-  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
-  if (entry) {
-    entry.status = 'ended';
-    saveDb();
-    logger.debug(`Marked giveaway as ended: ${messageId}`, { component: 'Database' });
-  }
+export async function markEnded(messageId: string, channelId: string): Promise<void> {
+  await ensureConnected();
+  await giveaways.updateOne(
+    { messageId, channelId },
+    { $set: { status: 'ended' } }
+  );
 }
 
-export function setNotificationMessageId(giveawayMessageId: string, channelId: string, notificationMessageId: string): void {
-  loadDb();
-  const entry = data.find(d => d.messageId === giveawayMessageId && d.channelId === channelId);
-  if (entry) {
-    entry.notificationMessageId = notificationMessageId;
-    saveDb();
-    logger.debug(`Saved notification message ID: ${notificationMessageId} for giveaway: ${giveawayMessageId}`, { component: 'Database' });
-  }
+export async function setNotificationMessageId(giveawayMessageId: string, channelId: string, notificationMessageId: string): Promise<void> {
+  await ensureConnected();
+  await giveaways.updateOne(
+    { messageId: giveawayMessageId, channelId },
+    { $set: { notificationMessageId } }
+  );
 }
 
-export function getGiveaway(messageId: string, channelId: string): GiveawayData | null {
-  loadDb();
-  const entry = data.find(d => d.messageId === messageId && d.channelId === channelId);
+export async function getGiveaway(messageId: string, channelId: string): Promise<GiveawayData | null> {
+  await ensureConnected();
+  const entry = await giveaways.findOne({ messageId, channelId });
   if (!entry) return null;
   return rowToGiveaway(entry);
 }
 
-export function getActiveGiveaways(limit: number = 50): GiveawayData[] {
-  loadDb();
+export async function getActiveGiveaways(limit: number = 50): Promise<GiveawayData[]> {
+  await ensureConnected();
   const now = Date.now();
-  return data
-    .filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now))
-    .slice(0, limit)
-    .map(rowToGiveaway);
+  const entries = await giveaways
+    .find({
+      status: 'active',
+      $or: [
+        { endsAt: null },
+        { endsAt: { $gt: now } },
+      ],
+    })
+    .sort({ detectedAt: -1 })
+    .limit(limit)
+    .toArray();
+  return entries.map(rowToGiveaway);
 }
 
-export function getAllGiveaways(limit: number = 100): GiveawayData[] {
-  loadDb();
-  return data
-    .slice(0, limit)
-    .map(rowToGiveaway);
+export async function getAllGiveaways(limit: number = 100): Promise<GiveawayData[]> {
+  await ensureConnected();
+  const entries = await giveaways
+    .find({})
+    .sort({ detectedAt: -1 })
+    .limit(limit)
+    .toArray();
+  return entries.map(rowToGiveaway);
 }
 
-export function getStats(): GiveawayStats {
-  loadDb();
+export async function getStats(): Promise<GiveawayStats> {
+  await ensureConnected();
   const now = Date.now();
-  const total = totalDetectedCount;
-  const active = data.filter(d => d.status === 'active' && (d.endsAt === null || d.endsAt > now)).length;
-  const servers = new Set(data.map(d => d.guildId)).size;
-  const last = data.length > 0 ? data.reduce((max, d) => Math.max(max, d.detectedAt), 0) : null;
+  const counter = await counters.findOne({ _id: 'total_detected' });
+  const total = counter?.total || 0;
+
+  const active = await giveaways.countDocuments({
+    status: 'active',
+    $or: [
+      { endsAt: null },
+      { endsAt: { $gt: now } },
+    ],
+  });
+
+  const servers = await giveaways.distinct('guildId');
+  const lastEntry = await giveaways
+    .find({})
+    .sort({ detectedAt: -1 })
+    .limit(1)
+    .toArray();
+  const last = lastEntry.length > 0 ? lastEntry[0].detectedAt : null;
 
   return {
     totalDetected: total,
     activeGiveaways: active,
-    serversWithGiveaways: servers,
+    serversWithGiveaways: servers.length,
     lastDetected: last,
   };
 }
 
-export function resetDatabase(): void {
-  loadDb();
-  data = [];
-  nextId = 1;
-  totalDetectedCount = 0;
-  saveDb();
+export async function resetDatabase(): Promise<void> {
+  await ensureConnected();
+  await giveaways.deleteMany({});
+  await counters.updateOne(
+    { _id: 'total_detected' },
+    { $set: { total: 0 } }
+  );
   logger.warn('Database reset', { component: 'Database' });
 }
 
-export function cleanupOldGiveaways(days: number = 30): void {
-  loadDb();
+export async function cleanupOldGiveaways(days: number = 30): Promise<void> {
+  await ensureConnected();
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const before = data.length;
-  data = data.filter(d => d.status === 'active' || d.detectedAt >= cutoff);
-  const removed = before - data.length;
-  if (removed > 0) {
-    saveDb();
-    logger.debug(`Cleaned up ${removed} old giveaways`, { component: 'Database' });
-  }
-  // Note: totalDetectedCount is NOT reduced — it stays as the all-time total
-}
-
-// ---------------------------------------------------------------------------
-// Purge ended giveaways — returns removed entries for bot.ts to edit messages
-// ---------------------------------------------------------------------------
-export function purgeEndedGiveaways(): StoredGiveaway[] {
-  loadDb();
-  const now = Date.now();
-  const removed: StoredGiveaway[] = [];
-
-  data = data.filter(d => {
-    const isActive = d.status === 'active';
-    const hasNoEndTime = d.endsAt === null;
-    const isStillRunning = d.endsAt !== null && d.endsAt > now;
-    const keep = isActive && (hasNoEndTime || isStillRunning);
-
-    if (!keep) {
-      removed.push({ ...d });
-      logger.debug(`Purging giveaway: ${d.messageId} (prize: ${d.prize?.substring(0, 30)})`, { component: 'Database' });
-    }
-
-    return keep;
+  const result = await giveaways.deleteMany({
+    status: { $ne: 'active' },
+    detectedAt: { $lt: cutoff },
   });
-
-  if (removed.length > 0) {
-    // Note: totalDetectedCount is NOT reduced — it stays as the all-time total
-    saveDb();
-    logger.info(`Purged ${removed.length} expired giveaways. Total tracked: ${totalDetectedCount}`, { component: 'Database' });
+  if (result.deletedCount > 0) {
+    logger.debug(`Cleaned up ${result.deletedCount} old giveaways`, { component: 'Database' });
   }
-
-  return removed;
 }
 
-export function closeDb(): void {
-  if (data.length > 0) saveDb();
-  logger.debug('Database closed', { component: 'Database' });
+export async function purgeEndedGiveaways(): Promise<StoredGiveaway[]> {
+  await ensureConnected();
+  const now = Date.now();
+
+  const toRemove = await giveaways
+    .find({
+      $or: [
+        { status: 'ended' },
+        { status: 'active', endsAt: { $ne: null, $lte: now } },
+        { status: { $nin: ['active', 'ended'] } },
+      ],
+    })
+    .toArray();
+
+  if (toRemove.length > 0) {
+    const ids = toRemove.map(g => g.messageId);
+    await giveaways.deleteMany({ messageId: { $in: ids } });
+    logger.info(`Purged ${toRemove.length} expired giveaways`, { component: 'Database' });
+  }
+
+  return toRemove;
+}
+
+export async function closeDb(): Promise<void> {
+  if (client) {
+    await client.close();
+    connected = false;
+    logger.debug('Database connection closed', { component: 'Database' });
+  }
 }
 
 function rowToGiveaway(row: StoredGiveaway): GiveawayData {
   return {
-    id: row.id,
     messageId: row.messageId,
     channelId: row.channelId,
     guildId: row.guildId,
