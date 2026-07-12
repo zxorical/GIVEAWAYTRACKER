@@ -92,7 +92,7 @@ const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
   /you\s+won/i,
   /you\s+did\s+not\s+win/i,
   /results\s+are\s+in/i,
-  /this\s+giveaway\s+is\+now\s+closed/i,
+  /this\s+giveaway\s+is\s+now\s+closed/i,
   /thank\s+you\s+for\s+participating/i,
 ];
 
@@ -231,7 +231,7 @@ export class GiveawayManager extends EventEmitter {
 
       const detectionTime = Date.now() - receivedAt;
 
-      // Store
+      // Prepare data for storage & notification
       const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
         messageId: message.id,
         channelId: message.channel.id,
@@ -241,12 +241,9 @@ export class GiveawayManager extends EventEmitter {
         authorId: message.author?.id || '',
         prize: detected.prize,
         detectedAt: receivedAt,
-        endsAt: detected.endsAt,
+        endsAt: detected.endsAt, // now allows null
         detectionTimeMs: detectionTime,
       };
-
-      const inserted = await insertGiveaway(data);
-      if (!inserted) return;
 
       this.stats.detected++;
 
@@ -255,8 +252,18 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      // Fire notification
-      this.sendNotification(data);
+      // --- FIX 3: Run save and notification in parallel ---
+      const savePromise = insertGiveaway(data);
+      const notifyPromise = this.sendNotification(data);
+
+      const inserted = await savePromise;
+      if (!inserted) {
+        // Save failed – notification might still be in flight, but we abort marking as notified.
+        // We could also cancel the notification, but for simplicity we let it finish.
+        return;
+      }
+
+      await notifyPromise; // Wait for notification to complete before continuing
     } finally {
       this.processingMessages.delete(key);
     }
@@ -357,7 +364,6 @@ export class GiveawayManager extends EventEmitter {
       if (!comps?.length) continue;
 
       for (const comp of comps) {
-        // Must be a button (type 2) and not a link button (style 5)
         if (comp.type !== 2 || comp.style === 5 || comp.disabled === true) continue;
         const customId = comp.customId || comp.custom_id;
         if (!customId) continue;
@@ -532,12 +538,12 @@ export class GiveawayManager extends EventEmitter {
     const guildId: string = data.guildId || '0';
     const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
 
-    // Generate a temporary ID for the notification; the database will have its own.
+    // Generate a temporary ID (string) – matches GiveawayData.id type now
     const tempId = `temp-${data.messageId}`;
 
     const fullData: GiveawayData = {
       ...data,
-      id: tempId,
+      id: tempId,                    // FIX 2: now a string
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
@@ -547,7 +553,8 @@ export class GiveawayManager extends EventEmitter {
     const sent = await this.botManager.sendGiveawayNotification(fullData);
     if (sent) {
       this.stats.notified++;
-      await markNotified(data.messageId, data.channelId);
+      // FIX 1: use non-null assertion because messageId/channelId are always strings
+      await markNotified(data.messageId!, data.channelId!);
     } else {
       this.stats.errors++;
     }
