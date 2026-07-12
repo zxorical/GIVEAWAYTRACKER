@@ -1,6 +1,6 @@
 /**
  * @module giveawayManager
- * Hyper-optimized giveaway detector – production grade.
+ * Hyper-optimized giveaway detector — production grade.
  *
  * - Single‑pass parse (no repeated embed/component walks)
  * - Integer constants for scores (no object lookups)
@@ -10,7 +10,6 @@
  * - Processing dedup map auto‑cleaned every 30s
  * - Fingerprint cache skips already‑seen messages
  * - Lazy prize extraction (only if score passes)
- * - Notification queue (non‑blocking, rate‑limited)
  */
 
 import { Client, Message, TextChannel } from 'discord.js-selfbot-v13';
@@ -61,7 +60,7 @@ const GW_COLORS = new Set([0xF1C40F, 0x7289DA, 0x2ECC71, 0xE91E63]);
 // Entry emojis (for reaction detection)
 const ENTRY_EMOJIS = new Set(['🎉', '🎁', '🎊', '🎈', '🎀', '👍', '✅']);
 
-// Timestamp regex – compiled once, reused via .test() on each text piece
+// Timestamp regex – compiled once, reused
 const TS_RE = /<t:(\d{10,13})(?::[a-zA-Z])?>/g;
 
 // Score constants (integers, no object lookup)
@@ -78,20 +77,16 @@ const SCORE_FIELD = 2;
 const MIN_SCORE = 6;
 
 // Processing map cleanup interval
-const PROCESSING_TTL = 30_000; // 30 seconds
+const PROCESSING_TTL = 30_000;
 
 // Fingerprint cache TTL
-const FINGERPRINT_TTL = 10_000; // 10 seconds – bots often send the same embed multiple times
-
-// Notification queue delay (ms between sends)
-const NOTIFY_QUEUE_DELAY = 500;
+const FINGERPRINT_TTL = 10_000;
 
 // ---------------------------------------------------------------------------
 // Helper types
 // ---------------------------------------------------------------------------
 
 interface ParsedMessage {
-  // Detection results (no nested objects, just booleans and values)
   hasButton: boolean;
   hasReaction: boolean;
   hasTimestamp: boolean;
@@ -103,7 +98,6 @@ interface ParsedMessage {
   hasAuthorKW: boolean;
   hasFieldGW: boolean;
   buttonCustomId: string | null;
-  // Prize is extracted lazily only after score passes
   prize?: string;
 }
 
@@ -116,16 +110,11 @@ export class GiveawayManager extends EventEmitter {
   private readonly accountLabel: string;
   private readonly botManager: BotManager | null;
 
-  // Expiring maps – cleaned periodically
-  private processing = new Map<string, number>(); // key → expiry timestamp
-  private fingerprints = new Map<string, number>(); // fingerprint → expiry
+  private processing = new Map<string, number>();
+  private fingerprints = new Map<string, number>();
 
   private inviteCache = new Map<string, { url: string; expires: number }>();
   private pendingInvites = new Map<string, Promise<string>>();
-
-  // Notification queue
-  private notifyQueue: GiveawayData[] = [];
-  private notifyRunning = false;
 
   private stats = {
     detected: 0,
@@ -136,7 +125,6 @@ export class GiveawayManager extends EventEmitter {
     startedAt: Date.now(),
   };
 
-  // Periodic cleanup interval
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
@@ -152,7 +140,6 @@ export class GiveawayManager extends EventEmitter {
     this.accountLabel = accountLabel;
     this.botManager = botManager;
 
-    // Start a background cleanup every 30s to remove expired processing/fingerprint entries
     this.cleanupInterval = setInterval(() => this.cleanupMaps(), 30_000);
   }
 
@@ -173,11 +160,11 @@ export class GiveawayManager extends EventEmitter {
     ) return;
     if (!message.author?.bot || !ALLOWED_BOT_IDS.has(message.author.id)) return;
 
-    // Quick blocked content check (combined regex)
+    // Quick blocked content check
     const content = message.content || '';
     if (BLOCKED_RE.test(content)) return;
 
-    // Check embed text (title + description) without concatenating
+    // Check embed text without concatenating
     const embed = message.embeds?.[0];
     if (embed) {
       if ((embed.title && BLOCKED_RE.test(embed.title)) ||
@@ -189,14 +176,14 @@ export class GiveawayManager extends EventEmitter {
     if (this.processing.has(key)) return;
     this.processing.set(key, now + PROCESSING_TTL);
 
-    // Fingerprint cache – skip if we've seen this exact giveaway recently
+    // Fingerprint cache
     const fp = this.buildFingerprint(message);
     if (fp && this.fingerprints.has(fp)) {
       return;
     }
 
     // ========================
-    // PARSE (single pass, minimal allocations)
+    // PARSE (single pass)
     // ========================
     const parsed = this.parseMessage(message, now);
     if (!parsed) {
@@ -205,7 +192,7 @@ export class GiveawayManager extends EventEmitter {
     }
 
     // ========================
-    // SCORE (pure integer math, no objects)
+    // SCORE
     // ========================
     const score = this.calcScore(parsed);
     if (score < MIN_SCORE) {
@@ -213,13 +200,13 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
-    // Store fingerprint so future identical messages are skipped
+    // Store fingerprint
     if (fp) {
       this.fingerprints.set(fp, now + FINGERPRINT_TTL);
     }
 
     // ========================
-    // DATABASE CHECK (only after scoring passes)
+    // DATABASE CHECK
     // ========================
     const existing = await getGiveaway(message.id, message.channel.id);
     if (existing) {
@@ -231,26 +218,25 @@ export class GiveawayManager extends EventEmitter {
     }
 
     // ========================
-    // RETRY? Only if no button AND no timestamp (likely incomplete message)
+    // RETRY only if no button AND no timestamp
     // ========================
     if (!parsed.hasButton && !parsed.hasTimestamp && embed) {
-      // Schedule async retry – components may load later
       this.scheduleRetry(message, now, key);
       return;
     }
 
     // ========================
-    // LAZY PRIZE EXTRACTION (only now that we know it's a giveaway)
+    // LAZY PRIZE EXTRACTION
     // ========================
     const prize = this.extractPrizeFromMessage(message, embed);
     parsed.prize = prize;
 
-    // Insert DB + queue notification
+    // Insert DB + notify
     await this.finalize(message, parsed, now);
   }
 
   // -------------------------------------------------------------------------
-  // Fingerprint – quick unique identifier for a giveaway
+  // Fingerprint
   // -------------------------------------------------------------------------
   private buildFingerprint(message: Message): string | null {
     const embed = message.embeds?.[0];
@@ -260,13 +246,13 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Single‑pass message parser – extracts detection booleans, no heavy work
+  // Single‑pass message parser
   // -------------------------------------------------------------------------
   private parseMessage(message: Message, now: number): ParsedMessage | null {
     const embed = message.embeds?.[0];
     const components = (message as any).components as any[] ?? null;
 
-    // ---- Button detection (inline, no function call) ----
+    // Button detection
     let hasButton = false;
     let buttonCustomId: string | null = null;
     if (components) {
@@ -287,7 +273,7 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    // ---- Reaction detection (inline) ----
+    // Reaction detection
     let hasReaction = false;
     if (embed) {
       const desc = embed.description || '';
@@ -300,12 +286,10 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    // ---- Timestamp scanning (no array allocations, reused regex) ----
+    // Timestamp scanning
     let timestamp: number | null = null;
-    // Scan multiple sources without joining
     const scanForTS = (text: string) => {
       if (!text) return;
-      // Reset regex state
       TS_RE.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = TS_RE.exec(text)) !== null) {
@@ -329,7 +313,7 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    // ---- Keyword detection (substring or regex depending on complexity) ----
+    // Keyword detection
     let hasTitleKW = false;
     let hasDescKW = false;
     let hasFooterEnd = false;
@@ -343,7 +327,6 @@ export class GiveawayManager extends EventEmitter {
       const footer = embed.footer?.text || '';
       const author = embed.author?.name || '';
 
-      // Use includes() for simple substrings where possible, regex for combined
       hasTitleKW = GIVEAWAY_KW_RE.test(title);
       hasDescKW = GIVEAWAY_KW_RE.test(desc);
       hasFooterEnd = FOOTER_END_RE.test(footer);
@@ -376,7 +359,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Score calculation – pure integer arithmetic
+  // Score calculation
   // -------------------------------------------------------------------------
   private calcScore(p: ParsedMessage): number {
     let score = 0;
@@ -393,13 +376,12 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Prize extraction (called lazily only after score passes)
+  // Prize extraction (lazy)
   // -------------------------------------------------------------------------
   private extractPrizeFromMessage(message: Message, embed: any): string {
     if (!embed) {
       return truncate(sanitizeForLog(message.content || 'Unknown Prize'), 200);
     }
-    // Check for a field named "Prize" first
     if (embed.fields) {
       for (const f of embed.fields) {
         if (/\bprize\b/i.test(f.name)) {
@@ -413,7 +395,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Button customId extraction (used by fingerprint)
+  // Button customId extraction (for fingerprint)
   // -------------------------------------------------------------------------
   private extractButtonCustomId(message: Message): string | null {
     const components = (message as any).components as any[] | undefined;
@@ -433,7 +415,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Async retry for incomplete messages
+  // Async retry
   // -------------------------------------------------------------------------
   private async scheduleRetry(message: Message, startTime: number, key: string): Promise<void> {
     await delay(300);
@@ -450,7 +432,6 @@ export class GiveawayManager extends EventEmitter {
       const existing = await getGiveaway(refreshed.id, refreshed.channel.id);
       if (existing) { this.processing.delete(key); return; }
 
-      // Prize extraction
       const prize = this.extractPrizeFromMessage(refreshed, refreshed.embeds?.[0]);
       parsed.prize = prize;
 
@@ -461,7 +442,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Finalize – DB insert + push to notification queue
+  // Finalize – DB insert + notify
   // -------------------------------------------------------------------------
   private async finalize(message: Message, parsed: ParsedMessage, receivedAt: number): Promise<void> {
     const now = Date.now();
@@ -490,73 +471,38 @@ export class GiveawayManager extends EventEmitter {
       return;
     }
 
-    // Add to background notification queue (fire‑and‑forget)
-    this.enqueueNotification(data);
-  }
+    // Send notification via botManager
+    if (this.botManager) {
+      const guildId = data.guildId || '0';
+      const cached = this.inviteCache.get(guildId);
+      const inviteUrl = (cached && cached.expires > Date.now())
+        ? cached.url
+        : `https://discord.com/channels/${guildId}`;
 
-  // -------------------------------------------------------------------------
-  // Background notification queue (non‑blocking, rate‑limited)
-  // -------------------------------------------------------------------------
-  private enqueueNotification(data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>): void {
-    this.notifyQueue.push(data as GiveawayData);
-    if (!this.notifyRunning) {
-      this.notifyRunning = true;
-      this.processNotifyQueue().catch(() => {});
-    }
-  }
+      const fullData: GiveawayData = {
+        ...data,
+        id: undefined,
+        status: 'active',
+        notifiedAt: null,
+        lastSeenAt: Date.now(),
+        inviteUrl,
+      };
 
-  private async processNotifyQueue(): Promise<void> {
-    while (this.notifyQueue.length > 0) {
-      const data = this.notifyQueue.shift();
-      if (!data) continue;
-      try {
-        await this.sendNotification(data);
-      } catch (err) {
-        this.log.error('Notification queue error', { error: formatError(err) });
+      const sent = await this.botManager.sendGiveawayNotification(fullData);
+      if (sent) {
+        this.stats.notified++;
+        await markNotified(data.messageId, data.channelId);
+      } else {
+        this.stats.errors++;
       }
-      // Small delay to avoid rate limits
-      await delay(NOTIFY_QUEUE_DELAY);
+
+      // Background invite fetch
+      this.fetchInviteForGuild(guildId).catch(() => {});
     }
-    this.notifyRunning = false;
   }
 
   // -------------------------------------------------------------------------
-  // Send a single notification (invite fetch is backgrounded)
-  // -------------------------------------------------------------------------
-  private async sendNotification(
-    data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>,
-  ): Promise<void> {
-    if (!this.botManager) return;
-
-    const guildId = data.guildId || '0';
-    const cached = this.inviteCache.get(guildId);
-    const inviteUrl = (cached && cached.expires > Date.now())
-      ? cached.url
-      : `https://discord.com/channels/${guildId}`;
-
-    const fullData: GiveawayData = {
-      ...data,
-      id: undefined,
-      status: 'active',
-      notifiedAt: null,
-      lastSeenAt: Date.now(),
-      inviteUrl,
-    };
-
-    const sent = await this.botManager.sendGiveawayNotification(fullData);
-    if (sent) {
-      this.stats.notified++;
-      await markNotified(data.messageId, data.channelId);
-    } else {
-      this.stats.errors++;
-    }
-
-    // Background invite update for next time
-    this.fetchInviteForGuild(guildId).catch(() => {});
-  }
-
-  // -------------------------------------------------------------------------
-  // Invite fetching (cached, with pending dedup)
+  // Invite fetching
   // -------------------------------------------------------------------------
   private async fetchInviteForGuild(guildId: string): Promise<string> {
     const cached = this.inviteCache.get(guildId);
@@ -599,7 +545,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Map cleanup (prevents memory leaks)
+  // Map cleanup
   // -------------------------------------------------------------------------
   private cleanupMaps(): void {
     const now = Date.now();
@@ -633,13 +579,6 @@ export class GiveawayManager extends EventEmitter {
 
   public async shutdown(): Promise<void> {
     if (this.cleanupInterval) clearInterval(this.cleanupInterval);
-    // Flush notification queue
-    while (this.notifyQueue.length > 0) {
-      const data = this.notifyQueue.shift();
-      if (data) {
-        try { await this.sendNotification(data); } catch {}
-      }
-    }
     this.log.info(`Shutting down ${this.accountLabel}...`);
     this.logStats();
   }
