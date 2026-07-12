@@ -508,15 +508,15 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification
+  // Notification (fixed type annotations)
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
     if (!this.botManager) return;
 
-    const guildId = data.guildId || '0';
-    const cachedInvite = this.getCachedInvite(guildId) || `https://discord.com/channels/${guildId}`;
+    const guildId: string = data.guildId || '0';
+    const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
 
     const fullData: GiveawayData = {
       ...data,
