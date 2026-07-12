@@ -1,4 +1,4 @@
-/**
+ /**
  * @module types
  * All shared TypeScript types
  */
@@ -17,21 +17,31 @@ export interface AppConfig {
 }
 
 export interface GiveawayData {
-  id?: number;
+  id?: string;
+
   messageId: string;
   channelId: string;
+
   guildId: string;
   guildName: string;
   channelName: string;
+
   authorId: string;
+
   prize: string;
+
   detectedAt: number;
   endsAt: number | null;
-  status: string; // 'active' | 'ended'
+
+  status: 'active' | 'ended';
+
   notifiedAt: number | null;
   lastSeenAt: number;
+
   inviteUrl?: string;
+
   notificationMessageId?: string;
+
   detectionTimeMs?: number;
 }
 
@@ -57,12 +67,19 @@ export interface DetectedGiveaway {
 
 export interface GiveawayMessage {
   content?: string;
+
   embeds?: {
     title?: string;
     description?: string;
-    footer?: { text?: string };
-    fields?: { name: string; value: string }[];
+    footer?: {
+      text?: string;
+    };
+    fields?: {
+      name: string;
+      value: string;
+    }[];
   }[];
+
   buttons?: {
     customId?: string;
     label?: string;
