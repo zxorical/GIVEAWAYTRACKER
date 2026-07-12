@@ -1,4 +1,4 @@
- /**
+/**
  * @module types
  * All shared TypeScript types
  */
@@ -27,7 +27,6 @@ export interface GiveawayData {
   channelName: string;
 
   authorId: string;
-
   prize: string;
 
   detectedAt: number;
@@ -39,7 +38,6 @@ export interface GiveawayData {
   lastSeenAt: number;
 
   inviteUrl?: string;
-
   notificationMessageId?: string;
 
   detectionTimeMs?: number;
