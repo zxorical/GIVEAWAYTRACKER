@@ -324,10 +324,14 @@ export class GiveawayManager extends EventEmitter {
 
     const embed = message.embeds?.[0];
     if (embed) {
-      if (embed.title && GIVEAWAY_KEYWORDS.some(re => re.test(embed.title)))
+      // FIX: Use nullish coalescing to handle null values safely
+      const title = embed.title ?? '';
+      const description = embed.description ?? '';
+
+      if (title && GIVEAWAY_KEYWORDS.some(re => re.test(title)))
         signals['TITLE_KEYWORD'] = GiveawaySignal.TITLE_KEYWORD;
 
-      if (embed.description && GIVEAWAY_KEYWORDS.some(re => re.test(embed.description)))
+      if (description && GIVEAWAY_KEYWORDS.some(re => re.test(description)))
         signals['DESCRIPTION_KEYWORD'] = GiveawaySignal.DESCRIPTION_KEYWORD;
 
       if (embed.footer?.text && /\bends\b|ends\s+in|expires\b/i.test(embed.footer.text))
@@ -539,8 +543,11 @@ export class GiveawayManager extends EventEmitter {
   ): Promise<void> {
     if (!this.botManager) return;
 
-    // FIX: Validate required fields before proceeding
-    if (!data.messageId || !data.channelId) {
+    // FIX: Extract and validate required fields
+    const messageId = data.messageId;
+    const channelId = data.channelId;
+    
+    if (!messageId || !channelId) {
       this.log.warn('Cannot send notification: missing messageId or channelId');
       return;
     }
@@ -561,8 +568,8 @@ export class GiveawayManager extends EventEmitter {
       const sent = await this.botManager.sendGiveawayNotification(fullData);
       if (sent) {
         this.stats.notified++;
-        // FIX: Use validated messageId and channelId (now guaranteed strings)
-        await markNotified(data.messageId, data.channelId);
+        // FIX: Use validated variables (now guaranteed strings)
+        await markNotified(messageId, channelId);
       } else {
         this.stats.errors++;
       }
