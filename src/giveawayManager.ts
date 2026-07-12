@@ -515,7 +515,8 @@ export class GiveawayManager extends EventEmitter {
   ): Promise<void> {
     if (!this.botManager) return;
 
-    const cachedInvite = this.getCachedInvite(data.guildId) || `https://discord.com/channels/${data.guildId}`;
+    const guildId = data.guildId || '0';
+    const cachedInvite = this.getCachedInvite(guildId) || `https://discord.com/channels/${guildId}`;
 
     const fullData: GiveawayData = {
       ...data,
@@ -534,7 +535,7 @@ export class GiveawayManager extends EventEmitter {
       this.stats.errors++;
     }
 
-    this.fetchInviteForGuild(data.guildId).catch(() => {});
+    this.fetchInviteForGuild(guildId).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
