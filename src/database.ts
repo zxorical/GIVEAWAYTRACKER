@@ -10,6 +10,7 @@
  *    also run on close()).
  *  - Connection is guarded against concurrent callers via a shared
  *    in-flight promise.
+ *  - Notification status fields added for tracking delivery state.
  */
 
 import { MongoClient, Db, Collection, AnyBulkWriteOperation } from 'mongodb';
@@ -30,6 +31,10 @@ interface StoredGiveaway {
   notifiedAt: number | null;
   lastSeenAt: number;
   notificationMessageId?: string;
+  // Notification tracking fields
+  notificationStatus?: string;       // 'pending' | 'sent' | 'failed'
+  notificationSentAt?: number;       // timestamp when sent
+  notificationError?: string;        // error message if failed
 }
 
 interface TotalCounter {
@@ -81,6 +86,7 @@ async function connect(): Promise<void> {
       await giveawaysCol.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
       await giveawaysCol.createIndex({ status: 1 });
       await giveawaysCol.createIndex({ detectedAt: -1 });
+      await giveawaysCol.createIndex({ notificationStatus: 1 });
 
       const docs = await giveawaysCol.find({}).toArray();
       cache.clear();
@@ -226,6 +232,7 @@ export async function insertGiveaway(
     status: 'active',
     notifiedAt: null,
     lastSeenAt: Date.now(),
+    notificationStatus: 'pending',  // mark as pending until notification is sent
   };
 
   cache.set(key, doc);
@@ -282,6 +289,31 @@ export async function setNotificationMessageId(
   const entry = cache.get(key);
   if (entry) {
     entry.notificationMessageId = notificationMessageId;
+    markDirty(key);
+  }
+}
+
+/**
+ * Update notification status fields on a giveaway document.
+ * Used by the bot's notification service to track delivery state.
+ */
+export async function updateNotificationStatus(
+  messageId: string,
+  channelId: string,
+  fields: {
+    notificationStatus?: string;
+    notificationSentAt?: number;
+    notificationMessageId?: string;
+    notificationError?: string;
+  }
+): Promise<void> {
+  const key = cacheKey(messageId, channelId);
+  const entry = cache.get(key);
+  if (entry) {
+    if (fields.notificationStatus !== undefined) entry.notificationStatus = fields.notificationStatus;
+    if (fields.notificationSentAt !== undefined) entry.notificationSentAt = fields.notificationSentAt;
+    if (fields.notificationMessageId !== undefined) entry.notificationMessageId = fields.notificationMessageId;
+    if (fields.notificationError !== undefined) entry.notificationError = fields.notificationError;
     markDirty(key);
   }
 }
