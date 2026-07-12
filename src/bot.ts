@@ -80,8 +80,8 @@ function safeUrl(base: string, ...parts: string[]): string {
 // ---------------------------------------------------------------------------
 commands.set('stats', async (interaction) => {
   await deferReply(interaction, false);
-  const stats = getStats();
-  const totalEver = getTotalDetected();
+  const stats = await getStats();
+  const totalEver = await getTotalDetected();
 
   const embed = new EmbedBuilder()
     .setColor(0x00AAFF)
@@ -99,7 +99,7 @@ commands.set('stats', async (interaction) => {
 
 commands.set('active', async (interaction) => {
   await deferReply(interaction, false);
-  const active = getActiveGiveaways(10);
+  const active = await getActiveGiveaways(10);
 
   if (active.length === 0) {
     await interaction.editReply({ content: '🔍 Nothing active right now.' });
@@ -125,7 +125,7 @@ commands.set('active', async (interaction) => {
 
 commands.set('recent', async (interaction) => {
   await deferReply(interaction, false);
-  const recent = getAllGiveaways(10);
+  const recent = await getAllGiveaways(10);
 
   if (recent.length === 0) {
     await interaction.editReply({ content: '📭 Nothing yet.' });
@@ -164,7 +164,7 @@ commands.set('setchannel', async (interaction) => {
 commands.set('reset', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, true);
-  resetDatabase();
+  await resetDatabase();
   await interaction.editReply({ content: '🗑️ Wiped.' });
 });
 
@@ -172,8 +172,8 @@ commands.set('status', async (interaction) => {
   if (!await requireAdmin(interaction)) return;
   await deferReply(interaction, false);
 
-  const stats = getStats();
-  const totalEver = getTotalDetected();
+  const stats = await getStats();
+  const totalEver = await getTotalDetected();
   const embed = new EmbedBuilder()
     .setColor(0x00FF00)
     .setTitle('🟢 Running')
@@ -245,7 +245,7 @@ commands.set('purge', async (interaction) => {
 // ---------------------------------------------------------------------------
 async function sendRolePanel(client: Client): Promise<void> {
   if (!PANEL_CHANNEL_ID) {
-    logger.warn('No panel channel set. Set PANEL_CHANNEL_ID in env.', { component: 'BotManager' });
+    logger.warn('No panel channel set.', { component: 'BotManager' });
     return;
   }
 
@@ -325,10 +325,10 @@ async function handlePingToggle(interaction: ButtonInteraction): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Rich Presence — uses persistent total counter (includes expired)
+// Rich Presence
 // ---------------------------------------------------------------------------
-function updatePresence(client: Client): void {
-  const totalEver = getTotalDetected();
+async function updatePresence(client: Client): Promise<void> {
+  const totalEver = await getTotalDetected();
 
   client.user?.setPresence({
     activities: [{ name: `${totalEver} giveaways tracked`, type: ActivityType.Watching }],
@@ -337,11 +337,11 @@ function updatePresence(client: Client): void {
 }
 
 // ---------------------------------------------------------------------------
-// Auto‑cleanup: edits expired embeds to RED, then purges DB
+// Auto‑cleanup
 // ---------------------------------------------------------------------------
 async function purgeAndUpdatePresence(client: Client): Promise<void> {
   try {
-    const removed = purgeEndedGiveaways();
+    const removed = await purgeEndedGiveaways();
 
     if (removed.length > 0) {
       const trackerChannel = client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
@@ -361,15 +361,14 @@ async function purgeAndUpdatePresence(client: Client): Promise<void> {
                 });
 
               await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
-              logger.debug(`Edited notification to red: ${notifMsgId}`, { component: 'BotManager' });
             }
           } catch {
-            // message might be gone, that's fine
+            // message might be gone
           }
         }
       }
 
-      updatePresence(client);
+      await updatePresence(client);
     }
   } catch (err) {
     logger.error('Purge error', { component: 'BotManager', error: formatError(err) });
@@ -397,7 +396,7 @@ export class BotManager {
 
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
-      updatePresence(this.client);
+      await updatePresence(this.client);
 
       this.presenceInterval = setInterval(() => updatePresence(this.client), 30_000);
 
@@ -466,7 +465,7 @@ export class BotManager {
 
     const inviteUrl = data.inviteUrl || 'No invite';
     const endsAt = data.endsAt || Date.now() + 3600000;
-    const detectionTime = Date.now() - data.detectedAt;
+    const detectionTime = data.detectionTimeMs ?? (Date.now() - data.detectedAt);
     const endTimestamp = Math.floor(endsAt / 1000);
     const winnerCount = this.extractWinnerCount(data.prize);
 
@@ -516,10 +515,9 @@ export class BotManager {
         components: [row],
       });
 
-      // Save the notification message ID so we can turn it red later
-      setNotificationMessageId(data.messageId, data.channelId, sentMessage.id);
+      await setNotificationMessageId(data.messageId, data.channelId, sentMessage.id);
 
-      updatePresence(this.client);
+      await updatePresence(this.client);
 
       logger.info(`Notification sent: ${data.messageId}`, { component: 'BotManager' });
       return true;
