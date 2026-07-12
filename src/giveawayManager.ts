@@ -1,23 +1,30 @@
 /**
  * @module giveawayManager
- * Hyper-optimized giveaway detector — production grade.
- *
- * - Single‑pass parse (no repeated embed/component walks)
- * - Integer constants for scores (no object lookups)
- * - Combined regexes + substring checks where possible
- * - No temporary arrays, no repeated lowercase
- * - Timestamp regex reused, not re‑compiled
- * - Processing dedup map auto‑cleaned every 30s
- * - Fingerprint cache skips already‑seen messages
- * - Lazy prize extraction (only if score passes)
+ * Reliable giveaway detector — scans everything, misses nothing.
+ * Original scoring system with performance caching.
  */
 
-import { Client, Message, TextChannel } from 'discord.js-selfbot-v13';
+import {
+  Client,
+  Message,
+  TextChannel,
+  Permissions,
+} from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
 import { logger, AppLogger } from './logger.js';
-import { delay, formatError, truncate, sanitizeForLog } from './utils.js';
-import { GiveawayData, DetectionSource, DetectedGiveaway } from './types.js';
+import {
+  delay,
+  formatError,
+  truncate,
+  sanitizeForLog,
+  formatTimestamp,
+} from './utils.js';
+import {
+  GiveawayData,
+  DetectionSource,
+  DetectedGiveaway,
+} from './types.js';
 import {
   insertGiveaway,
   wasNotifiedRecently,
@@ -29,76 +36,101 @@ import {
 import { BotManager } from './bot.js';
 
 // ---------------------------------------------------------------------------
-// Compiled constants – no allocations at runtime
+// Constants
 // ---------------------------------------------------------------------------
 
-const ALLOWED_BOT_IDS = new Set(['530082442967646230']);
-
-const TRUSTED_BUTTON_IDS = new Set([
-  'giveaway_message', 'giveaway-enter', 'enter_giveaway', 'giveaway_enter',
-  'join_giveaway', 'giveaway-join', 'giveaway_participate', 'participate_giveaway', 'enter',
+const ALLOWED_GIVEAWAY_BOT_IDS: ReadonlySet<string> = new Set([
+  '530082442967646230',
 ]);
 
-// Combined blocked content regex (single pass, no loop)
-const BLOCKED_RE = /already\s+entered|you(?:'ve|\s+have)\s+already|leave\s+giveaway|join(?:ed)?\s+success|entry\s+confirmed|entered\s+successfully|you're\s+entered|withdraw\s+entry|giveaway\s+(?:has\s+)?ended|giveaway\s+(?:is\s+)?over|winner\b.*\bselected|congratulations|you\s+won|you\s+did\s+not\s+win|results\s+are\s+in|this\s+giveaway\s+is\s+now\s+closed|thank\s+you\s+for\s+participating/i;
+const TRUSTED_ENTRY_CUSTOM_IDS: ReadonlySet<string> = new Set([
+  'giveaway_message',
+  'giveaway-enter',
+  'enter_giveaway',
+  'giveaway_enter',
+  'join_giveaway',
+  'giveaway-join',
+  'giveaway_participate',
+  'participate_giveaway',
+  'enter',
+]);
 
-// Combined giveaway keyword regex (for title/description)
-const GIVEAWAY_KW_RE = /giveaway|raffle|sweepstakes|prize|win/i;
+const ENTRY_BUTTON_LABEL_PATTERNS: ReadonlyArray<RegExp> = [
+  /\benter\b/i,
+  /\bjoin\b/i,
+  /\bparticipate\b/i,
+  /\braffle\b/i,
+  /\bsweepstakes\b/i,
+  /\bsubmit\b/i,
+  /count\s+me\s+in/i,
+  /\bgiveaway\b/i,
+  /🎉/,
+  /🎁/,
+  /🏆/,
+  /^\d[\d,]*$/,
+];
 
-// Button label patterns – combined
-const BUTTON_LABEL_RE = /enter|join|participate|raffle|sweepstakes|submit|count\s+me\s+in|giveaway|🎉|🎁|🏆|^\d[\d,]*$/i;
+const ENTRY_EMOJI_PATTERNS: ReadonlyArray<string> = [
+  '🎉', '🎁', '🎊', '🎈', '🎀', '👍', '✅',
+];
 
-// Footer end patterns
-const FOOTER_END_RE = /\bends?\b|expires/i;
+const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
+  /already\s+entered\s+this\s+giveaway/i,
+  /you(?:'ve|\s+have)\s+already\s+entered/i,
+  /you\s+are\s+already\s+(?:in|entered|participating)/i,
+  /you(?:'ve|\s+have)\s+already\s+(?:joined|joined\s+this)/i,
+  /leave\s+giveaway/i,
+  /join(?:ed)?\s+success(?:fully)?/i,
+  /entry\s+confirmed/i,
+  /entered\s+successfully/i,
+  /you're\s+entered/i,
+  /withdraw\s+entry/i,
+  /giveaway\s+(?:has\s+)?ended/i,
+  /giveaway\s+(?:is\s+)?over/i,
+  /winner(?:s)?\b.*\bselected/i,
+  /congratulations\b/i,
+  /you\s+won/i,
+  /you\s+did\s+not\s+win/i,
+  /results\s+are\s+in/i,
+  /this\s+giveaway\s+is\s+now\s+closed/i,
+  /thank\s+you\s+for\s+participating/i,
+];
 
-// Field giveaway indicators
-const FIELD_GW_RE = /ends?\s+in|winners?|time\s+remaining/i;
+// ---------------------------------------------------------------------------
+// Scoring System
+// ---------------------------------------------------------------------------
+enum GiveawaySignal {
+  ENTRY_BUTTON = 3,
+  ENTRY_REACTION = 2,
+  TITLE_KEYWORD = 2,
+  DESCRIPTION_KEYWORD = 1,
+  FOOTER_ENDS = 2,
+  FUTURE_TIMESTAMP = 3,
+  EMBED_COLOR = 1,
+  AUTHOR_KNOWN = 1,
+  FIELD_GIVEAWAY = 2,
+}
 
-// Giveaway embed colors
-const GW_COLORS = new Set([0xF1C40F, 0x7289DA, 0x2ECC71, 0xE91E63]);
+const GIVEAWAY_KEYWORDS: ReadonlyArray<RegExp> = [
+  /\bgiveaway\b/i,
+  /\braffle\b/i,
+  /\bsweepstakes\b/i,
+  /\bwin\b/i,
+  /\bprize\b/i,
+];
 
-// Entry emojis (for reaction detection)
-const ENTRY_EMOJIS = new Set(['🎉', '🎁', '🎊', '🎈', '🎀', '👍', '✅']);
-
-// Timestamp regex – compiled once, reused
-const TS_RE = /<t:(\d{10,13})(?::[a-zA-Z])?>/g;
-
-// Score constants (integers, no object lookup)
-const SCORE_BUTTON = 3;
-const SCORE_REACTION = 2;
-const SCORE_TITLE_KW = 2;
-const SCORE_DESC_KW = 1;
-const SCORE_FOOTER = 2;
-const SCORE_TIMESTAMP = 3;
-const SCORE_COLOR = 1;
-const SCORE_AUTHOR = 1;
-const SCORE_FIELD = 2;
-
-const MIN_SCORE = 6;
-
-// Processing map cleanup interval
-const PROCESSING_TTL = 30_000;
-
-// Fingerprint cache TTL
-const FINGERPRINT_TTL = 10_000;
+const MINIMUM_SCORE_THRESHOLD = 6;
 
 // ---------------------------------------------------------------------------
 // Helper types
 // ---------------------------------------------------------------------------
+interface ButtonInfo {
+  customId: string;
+  label: string;
+}
 
-interface ParsedMessage {
-  hasButton: boolean;
-  hasReaction: boolean;
-  hasTimestamp: boolean;
-  timestamp: number | null;
-  hasTitleKW: boolean;
-  hasDescKW: boolean;
-  hasFooterEnd: boolean;
-  hasColor: boolean;
-  hasAuthorKW: boolean;
-  hasFieldGW: boolean;
-  buttonCustomId: string | null;
-  prize?: string;
+interface ReactionInfo {
+  emoji: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,11 +141,11 @@ export class GiveawayManager extends EventEmitter {
   private readonly log: AppLogger;
   private readonly accountLabel: string;
   private readonly botManager: BotManager | null;
+  private readonly userToken: string;
 
-  private processing = new Map<string, number>();
-  private fingerprints = new Map<string, number>();
+  private processingMessages = new Set<string>();
 
-  private inviteCache = new Map<string, { url: string; expires: number }>();
+  private inviteCache = new Map<string, { url: string; expiresAt: number }>();
   private pendingInvites = new Map<string, Promise<string>>();
 
   private stats = {
@@ -121,16 +153,14 @@ export class GiveawayManager extends EventEmitter {
     notified: 0,
     skipped: 0,
     errors: 0,
-    falsePositives: 0,
+    falsePositivesBlocked: 0,
     startedAt: Date.now(),
   };
-
-  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
     client: Client,
     log: AppLogger,
-    _token: string,
+    token: string,
     accountLabel: string,
     botManager: BotManager | null,
   ) {
@@ -139,384 +169,313 @@ export class GiveawayManager extends EventEmitter {
     this.log = log;
     this.accountLabel = accountLabel;
     this.botManager = botManager;
-
-    this.cleanupInterval = setInterval(() => this.cleanupMaps(), 30_000);
+    this.userToken = token;
   }
 
   // -------------------------------------------------------------------------
-  // Public entry – extremely fast hot path
+  // Public API
   // -------------------------------------------------------------------------
   public async handleMessage(message: Message): Promise<void> {
-    const now = Date.now();
+    const receivedAt = Date.now();
 
-    // ========================
-    // GUARDS (all sync, early exit)
-    // ========================
+    // Fast‑path guards
     if (!message.guild) return;
     if (message.author?.id === this.client.user?.id) return;
+
     if (
       CONFIG.monitoredChannels.length > 0 &&
       !CONFIG.monitoredChannels.includes(message.channel.id)
-    ) return;
-    if (!message.author?.bot || !ALLOWED_BOT_IDS.has(message.author.id)) return;
+    ) {
+      return;
+    }
 
-    // Quick blocked content check
+    if (!this.isAllowedBot(message)) return;
+
+    // Blocked content check
     const content = message.content || '';
-    if (BLOCKED_RE.test(content)) return;
-
-    // Check embed text without concatenating
-    const embed = message.embeds?.[0];
-    if (embed) {
-      if ((embed.title && BLOCKED_RE.test(embed.title)) ||
-          (embed.description && BLOCKED_RE.test(embed.description))) return;
-    }
-
-    // Deduplicate via expiring map
-    const key = `${message.channel.id}:${message.id}`;
-    if (this.processing.has(key)) return;
-    this.processing.set(key, now + PROCESSING_TTL);
-
-    // Fingerprint cache
-    const fp = this.buildFingerprint(message);
-    if (fp && this.fingerprints.has(fp)) {
+    if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
       return;
     }
 
-    // ========================
-    // PARSE (single pass)
-    // ========================
-    const parsed = this.parseMessage(message, now);
-    if (!parsed) {
-      this.stats.falsePositives++;
-      return;
-    }
-
-    // ========================
-    // SCORE
-    // ========================
-    const score = this.calcScore(parsed);
-    if (score < MIN_SCORE) {
-      this.stats.falsePositives++;
-      return;
-    }
-
-    // Store fingerprint
-    if (fp) {
-      this.fingerprints.set(fp, now + FINGERPRINT_TTL);
-    }
-
-    // ========================
-    // DATABASE CHECK
-    // ========================
-    const existing = await getGiveaway(message.id, message.channel.id);
-    if (existing) {
-      await updateLastSeen(message.id, message.channel.id);
-      if (existing.status === 'active' && parsed.timestamp && parsed.timestamp < now) {
-        await markEnded(message.id, message.channel.id);
+    for (const embed of message.embeds ?? []) {
+      const text = [embed.title, embed.description].join(' ').toLowerCase();
+      if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(text))) {
+        return;
       }
-      return;
     }
 
-    // ========================
-    // RETRY only if no button AND no timestamp
-    // ========================
-    if (!parsed.hasButton && !parsed.hasTimestamp && embed) {
-      this.scheduleRetry(message, now, key);
+    // Block duplicate processing
+    const key = `${message.id}-${message.channel.id}`;
+    if (this.processingMessages.has(key)) {
       return;
     }
+    this.processingMessages.add(key);
 
-    // ========================
-    // LAZY PRIZE EXTRACTION
-    // ========================
-    const prize = this.extractPrizeFromMessage(message, embed);
-    parsed.prize = prize;
+    try {
+      // Deduplication
+      const existing = await getGiveaway(message.id, message.channel.id);
+      if (existing) {
+        await updateLastSeen(message.id, message.channel.id);
+        if (existing.status === 'active' && this.isEnded(message)) {
+          await markEnded(message.id, message.channel.id);
+        }
+        return;
+      }
 
-    // Insert DB + notify
-    await this.finalize(message, parsed, now);
+      // Detection — full scan with retry
+      const detected = await this.detectGiveaway(message);
+      if (!detected) {
+        this.stats.falsePositivesBlocked++;
+        return;
+      }
+
+      const detectionTime = Date.now() - receivedAt;
+
+      // Store
+      const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
+        messageId: message.id,
+        channelId: message.channel.id,
+        guildId: message.guild.id,
+        guildName: message.guild.name,
+        channelName: (message.channel as any).name || 'unknown',
+        authorId: message.author?.id || '',
+        prize: detected.prize,
+        detectedAt: receivedAt,
+        endsAt: detected.endsAt,
+        detectionTimeMs: detectionTime,
+      };
+
+      const inserted = await insertGiveaway(data);
+      if (!inserted) return;
+
+      this.stats.detected++;
+
+      if (await wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
+        this.stats.skipped++;
+        return;
+      }
+
+      // Fire notification
+      this.sendNotification(data);
+    } finally {
+      this.processingMessages.delete(key);
+    }
   }
 
   // -------------------------------------------------------------------------
-  // Fingerprint
+  // Detection — full scan with button retry
   // -------------------------------------------------------------------------
-  private buildFingerprint(message: Message): string | null {
-    const embed = message.embeds?.[0];
-    if (!embed?.title) return null;
-    const button = this.extractButtonCustomId(message);
-    return `${message.author?.id}|${embed.title}|${button || ''}`;
+  private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
+    // Try sync first
+    let signals = this.collectSignalsSync(message);
+    let score = Object.values(signals).reduce((sum, v) => sum + v, 0);
+    let button = this.extractEntryButton(message);
+
+    // If no button found, retry with fetch
+    if (!button) {
+      await delay(200);
+      try {
+        const refreshed = await message.fetch();
+        signals = this.collectSignalsSync(refreshed);
+        score = Object.values(signals).reduce((sum, v) => sum + v, 0);
+        button = this.extractEntryButton(refreshed);
+      } catch {
+        // Keep original signals
+      }
+    }
+
+    if (score < MINIMUM_SCORE_THRESHOLD) return null;
+
+    const prize = this.extractPrize(message);
+    const endsAt = this.extractEndTimestamp(message);
+
+    if (endsAt && endsAt < Date.now()) return null;
+
+    let source = DetectionSource.CONTENT;
+    if (button) source = DetectionSource.COMPONENT;
+
+    return { prize, source, endsAt, buttonCustomId: button?.customId };
   }
 
   // -------------------------------------------------------------------------
-  // Single‑pass message parser
+  // Signal collection (sync version — walks everything once)
   // -------------------------------------------------------------------------
-  private parseMessage(message: Message, now: number): ParsedMessage | null {
+  private collectSignalsSync(message: Message): Record<string, number> {
+    const signals: Record<string, number> = {};
+
+    const button = this.extractEntryButton(message);
+    if (button) signals['ENTRY_BUTTON'] = GiveawaySignal.ENTRY_BUTTON;
+
+    if (!button) {
+      const entryReaction = this.extractEntryReaction(message);
+      if (entryReaction) signals['ENTRY_REACTION'] = GiveawaySignal.ENTRY_REACTION;
+    }
+
     const embed = message.embeds?.[0];
-    const components = (message as any).components as any[] ?? null;
-
-    // Button detection
-    let hasButton = false;
-    let buttonCustomId: string | null = null;
-    if (components) {
-      for (const row of components) {
-        const comps = row.components as any[] | undefined;
-        if (!comps) continue;
-        for (const comp of comps) {
-          if (comp.type !== 2 || comp.style === 5 || comp.disabled) continue;
-          const cid = comp.customId || comp.custom_id;
-          const label = (comp.label || '').trim();
-          if (TRUSTED_BUTTON_IDS.has(cid) || BUTTON_LABEL_RE.test(label)) {
-            hasButton = true;
-            buttonCustomId = cid;
-            break;
-          }
-        }
-        if (hasButton) break;
-      }
-    }
-
-    // Reaction detection
-    let hasReaction = false;
     if (embed) {
-      const desc = embed.description || '';
-      const footer = embed.footer?.text || '';
-      for (const emoji of ENTRY_EMOJIS) {
-        if (desc.indexOf(emoji) !== -1 || footer.indexOf(emoji) !== -1) {
-          hasReaction = true;
-          break;
-        }
-      }
-    }
+      if (embed.title && GIVEAWAY_KEYWORDS.some(re => re.test(embed.title)))
+        signals['TITLE_KEYWORD'] = GiveawaySignal.TITLE_KEYWORD;
 
-    // Timestamp scanning
-    let timestamp: number | null = null;
-    const scanForTS = (text: string) => {
-      if (!text) return;
-      TS_RE.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = TS_RE.exec(text)) !== null) {
-        const raw = parseInt(match[1], 10);
-        const ts = raw < 1e12 ? raw * 1000 : raw;
-        if (ts > now && (timestamp === null || ts > timestamp)) {
-          timestamp = ts;
-        }
-      }
-    };
-    scanForTS(message.content || '');
-    if (embed) {
-      scanForTS(embed.title || '');
-      scanForTS(embed.description || '');
-      scanForTS(embed.footer?.text || '');
-      if (embed.fields) {
-        for (const f of embed.fields) {
-          scanForTS(f.name);
-          scanForTS(f.value);
-        }
-      }
-    }
+      if (embed.description && GIVEAWAY_KEYWORDS.some(re => re.test(embed.description)))
+        signals['DESCRIPTION_KEYWORD'] = GiveawaySignal.DESCRIPTION_KEYWORD;
 
-    // Keyword detection
-    let hasTitleKW = false;
-    let hasDescKW = false;
-    let hasFooterEnd = false;
-    let hasColor = false;
-    let hasAuthorKW = false;
-    let hasFieldGW = false;
+      if (embed.footer?.text && /\bends\b|ends\s+in|expires\b/i.test(embed.footer.text))
+        signals['FOOTER_ENDS'] = GiveawaySignal.FOOTER_ENDS;
 
-    if (embed) {
-      const title = embed.title || '';
-      const desc = embed.description || '';
-      const footer = embed.footer?.text || '';
-      const author = embed.author?.name || '';
+      if (embed.author?.name && /\bgiveaway\b/i.test(embed.author.name))
+        signals['AUTHOR_KNOWN'] = GiveawaySignal.AUTHOR_KNOWN;
 
-      hasTitleKW = GIVEAWAY_KW_RE.test(title);
-      hasDescKW = GIVEAWAY_KW_RE.test(desc);
-      hasFooterEnd = FOOTER_END_RE.test(footer);
-      hasAuthorKW = author.toLowerCase().includes('giveaway');
-      hasColor = embed.color !== null && embed.color !== undefined && GW_COLORS.has(embed.color);
+      if (embed.color && [0xF1C40F, 0x7289DA, 0x2ECC71, 0xE91E63].includes(embed.color))
+        signals['EMBED_COLOR'] = GiveawaySignal.EMBED_COLOR;
 
       if (embed.fields) {
-        for (const f of embed.fields) {
-          if (FIELD_GW_RE.test(f.name)) {
-            hasFieldGW = true;
+        for (const field of embed.fields) {
+          if (/\b(?:ends?\s+in|winners?|time\s+remaining)\b/i.test(field.name)) {
+            signals['FIELD_GIVEAWAY'] = GiveawaySignal.FIELD_GIVEAWAY;
             break;
           }
         }
       }
     }
 
-    return {
-      hasButton,
-      hasReaction,
-      hasTimestamp: timestamp !== null,
-      timestamp,
-      hasTitleKW,
-      hasDescKW,
-      hasFooterEnd,
-      hasColor,
-      hasAuthorKW,
-      hasFieldGW,
-      buttonCustomId,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Score calculation
-  // -------------------------------------------------------------------------
-  private calcScore(p: ParsedMessage): number {
-    let score = 0;
-    if (p.hasButton) score += SCORE_BUTTON;
-    if (p.hasReaction) score += SCORE_REACTION;
-    if (p.hasTimestamp) score += SCORE_TIMESTAMP;
-    if (p.hasTitleKW) score += SCORE_TITLE_KW;
-    if (p.hasDescKW) score += SCORE_DESC_KW;
-    if (p.hasFooterEnd) score += SCORE_FOOTER;
-    if (p.hasColor) score += SCORE_COLOR;
-    if (p.hasAuthorKW) score += SCORE_AUTHOR;
-    if (p.hasFieldGW) score += SCORE_FIELD;
-    return score;
-  }
-
-  // -------------------------------------------------------------------------
-  // Prize extraction (lazy)
-  // -------------------------------------------------------------------------
-  private extractPrizeFromMessage(message: Message, embed: any): string {
-    if (!embed) {
-      return truncate(sanitizeForLog(message.content || 'Unknown Prize'), 200);
+    if (this.extractEndTimestamp(message) !== null) {
+      signals['FUTURE_TIMESTAMP'] = GiveawaySignal.FUTURE_TIMESTAMP;
     }
-    if (embed.fields) {
-      for (const f of embed.fields) {
-        if (/\bprize\b/i.test(f.name)) {
-          return truncate(sanitizeForLog(f.value), 200);
-        }
-      }
-    }
-    if (embed.title) return truncate(sanitizeForLog(embed.title), 200);
-    if (embed.description) return truncate(sanitizeForLog(embed.description), 200);
-    return truncate(sanitizeForLog(message.content || 'Unknown Prize'), 200);
+
+    return signals;
   }
 
   // -------------------------------------------------------------------------
-  // Button customId extraction (for fingerprint)
+  // Button detection
   // -------------------------------------------------------------------------
-  private extractButtonCustomId(message: Message): string | null {
+  private extractEntryButton(message: Message): ButtonInfo | null {
     const components = (message as any).components as any[] | undefined;
     if (!components?.length) return null;
+
     for (const row of components) {
       const comps = row.components as any[] | undefined;
       if (!comps) continue;
+
       for (const comp of comps) {
-        if (comp.type !== 2 || comp.style === 5 || comp.disabled) continue;
-        const cid = comp.customId || comp.custom_id;
-        if (TRUSTED_BUTTON_IDS.has(cid) || BUTTON_LABEL_RE.test(comp.label || '')) {
-          return cid;
-        }
+        if (comp.type !== 2 || comp.style === 5 || comp.disabled === true) continue;
+        const customId = comp.customId || comp.custom_id;
+        if (!customId) continue;
+
+        const label = (comp.label || '').trim();
+        if (TRUSTED_ENTRY_CUSTOM_IDS.has(customId)) return { customId, label: label || customId };
+        if (ENTRY_BUTTON_LABEL_PATTERNS.some(re => re.test(label))) return { customId, label: label || 'Enter' };
       }
     }
     return null;
   }
 
   // -------------------------------------------------------------------------
-  // Async retry
+  // Reaction emoji extraction
   // -------------------------------------------------------------------------
-  private async scheduleRetry(message: Message, startTime: number, key: string): Promise<void> {
-    await delay(300);
-    try {
-      const refreshed = await message.fetch().catch(() => null);
-      if (!refreshed) { this.processing.delete(key); this.stats.falsePositives++; return; }
-
-      const parsed = this.parseMessage(refreshed, Date.now());
-      if (!parsed) { this.processing.delete(key); this.stats.falsePositives++; return; }
-
-      const score = this.calcScore(parsed);
-      if (score < MIN_SCORE) { this.processing.delete(key); this.stats.falsePositives++; return; }
-
-      const existing = await getGiveaway(refreshed.id, refreshed.channel.id);
-      if (existing) { this.processing.delete(key); return; }
-
-      const prize = this.extractPrizeFromMessage(refreshed, refreshed.embeds?.[0]);
-      parsed.prize = prize;
-
-      await this.finalize(refreshed, parsed, startTime);
-    } catch {
-      this.processing.delete(key);
+  private extractEntryReaction(message: Message): ReactionInfo | null {
+    const embed = message.embeds?.[0];
+    if (!embed) return null;
+    const text = [embed.description, embed.footer?.text].filter(Boolean).join(' ');
+    for (const emoji of ENTRY_EMOJI_PATTERNS) {
+      if (text.includes(emoji)) return { emoji };
     }
+    return null;
   }
 
   // -------------------------------------------------------------------------
-  // Finalize – DB insert + notify
+  // Allowed bot check
   // -------------------------------------------------------------------------
-  private async finalize(message: Message, parsed: ParsedMessage, receivedAt: number): Promise<void> {
-    const now = Date.now();
-    const detectionTime = now - receivedAt;
+  private isAllowedBot(message: Message): boolean {
+    return !!(message.author?.bot && message.author.id && ALLOWED_GIVEAWAY_BOT_IDS.has(message.author.id));
+  }
 
-    const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
-      messageId: message.id,
-      channelId: message.channel.id,
-      guildId: message.guild!.id,
-      guildName: message.guild!.name,
-      channelName: (message.channel as any).name || 'unknown',
-      authorId: message.author?.id || '',
-      prize: parsed.prize || 'Unknown Prize',
-      detectedAt: receivedAt,
-      endsAt: parsed.timestamp,
-      detectionTimeMs: detectionTime,
-    };
-
-    const inserted = await insertGiveaway(data);
-    if (!inserted) return;
-
-    this.stats.detected++;
-
-    if (await wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
-      this.stats.skipped++;
-      return;
-    }
-
-    // Send notification via botManager
-    if (this.botManager) {
-      const guildId = data.guildId || '0';
-      const cached = this.inviteCache.get(guildId);
-      const inviteUrl = (cached && cached.expires > Date.now())
-        ? cached.url
-        : `https://discord.com/channels/${guildId}`;
-
-      const fullData: GiveawayData = {
-        ...data,
-        id: undefined,
-        status: 'active',
-        notifiedAt: null,
-        lastSeenAt: Date.now(),
-        inviteUrl,
-      };
-
-      const sent = await this.botManager.sendGiveawayNotification(fullData);
-      if (sent) {
-        this.stats.notified++;
-        await markNotified(data.messageId, data.channelId);
-      } else {
-        this.stats.errors++;
+  // -------------------------------------------------------------------------
+  // Prize extraction
+  // -------------------------------------------------------------------------
+  private extractPrize(message: Message): string {
+    const embed = message.embeds?.[0];
+    if (embed) {
+      if (embed.fields) {
+        const prizeField = embed.fields.find(f => /\bprize\b/i.test(f.name));
+        if (prizeField) return this.cleanText(prizeField.value);
       }
-
-      // Background invite fetch
-      this.fetchInviteForGuild(guildId).catch(() => {});
+      if (embed.title) return this.cleanText(embed.title);
+      if (embed.description) return this.cleanText(embed.description);
     }
+    return this.cleanText(message.content || 'Unknown Prize');
   }
 
   // -------------------------------------------------------------------------
-  // Invite fetching
+  // Timestamp extraction
   // -------------------------------------------------------------------------
-  private async fetchInviteForGuild(guildId: string): Promise<string> {
+  private extractEndTimestamp(message: Message): number | null {
+    const re = /<t:(\d{10,13})(?::[a-zA-Z])?>/;
+    const texts: string[] = [
+      message.content || '',
+      ...message.embeds.flatMap(e => [
+        e.title || '',
+        e.description || '',
+        e.footer?.text || '',
+        ...(e.fields || []).flatMap(f => [f.name, f.value]),
+      ]),
+    ];
+    const joined = texts.join(' ');
+
+    const matches = joined.matchAll(new RegExp(re.source, 'g'));
+    let best: number | null = null;
+    for (const match of matches) {
+      const raw = parseInt(match[1], 10);
+      const tsMs = raw < 1e12 ? raw * 1000 : raw;
+      if (Number.isFinite(tsMs) && tsMs > Date.now()) {
+        if (best === null || tsMs > best) best = tsMs;
+      }
+    }
+    return best;
+  }
+
+  private isEnded(message: Message): boolean {
+    const endsAt = this.extractEndTimestamp(message);
+    if (endsAt === null) return false;
+    return endsAt < Date.now();
+  }
+
+  // -------------------------------------------------------------------------
+  // Utilities
+  // -------------------------------------------------------------------------
+  private cleanText(text: string): string {
+    return truncate(sanitizeForLog(text), 200);
+  }
+
+  // -------------------------------------------------------------------------
+  // Cached invite
+  // -------------------------------------------------------------------------
+  private getCachedInvite(guildId: string): string | null {
     const cached = this.inviteCache.get(guildId);
-    if (cached && cached.expires > Date.now()) return cached.url;
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.url;
+    }
+    this.inviteCache.delete(guildId);
+    return null;
+  }
+
+  private setCachedInvite(guildId: string, url: string): void {
+    this.inviteCache.set(guildId, { url, expiresAt: Date.now() + 30 * 60 * 1000 });
+  }
+
+  private async fetchInviteForGuild(guildId: string): Promise<string> {
+    const cached = this.getCachedInvite(guildId);
+    if (cached) return cached;
 
     const pending = this.pendingInvites.get(guildId);
     if (pending) return pending;
 
     const promise = this.doFetchInvite(guildId);
     this.pendingInvites.set(guildId, promise);
+
     try {
       const url = await promise;
       if (url && !url.includes('unavailable') && !url.includes('not reachable')) {
-        this.inviteCache.set(guildId, { url, expires: Date.now() + 30 * 60_000 });
+        this.setCachedInvite(guildId, url);
       }
       return url;
     } finally {
@@ -528,16 +487,33 @@ export class GiveawayManager extends EventEmitter {
     try {
       const guild = this.client.guilds.cache.get(guildId);
       if (!guild) return 'Server not reachable';
-      const invites = await guild.invites.fetch().catch(() => null);
-      const perm = invites?.find(i => i.maxAge === 0 && i.maxUses === 0);
-      if (perm) return perm.url;
-      const channel = guild.channels.cache.find(
-        (ch): ch is TextChannel => ch.type === 'GUILD_TEXT',
-      ) as TextChannel | undefined;
-      if (channel) {
-        const inv = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
-        return inv.url;
+
+      try {
+        const invites = await guild.invites.fetch();
+        if (invites?.size > 0) {
+          const permanent = invites.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
+          return permanent ? permanent.url : invites.first()!.url;
+        }
+      } catch {}
+
+      try {
+        const vanity = (guild as any).vanityURLCode;
+        if (vanity) return `https://discord.gg/${vanity}`;
+      } catch {}
+
+      const channels = guild.channels.cache.filter(
+        (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
+      ) as unknown as TextChannel[];
+
+      for (const channel of channels.values()) {
+        try {
+          const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
+          return invite.url;
+        } catch {
+          continue;
+        }
       }
+
       return `https://discord.com/channels/${guildId}`;
     } catch {
       return `https://discord.com/channels/${guildId}`;
@@ -545,20 +521,38 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Map cleanup
+  // Notification
   // -------------------------------------------------------------------------
-  private cleanupMaps(): void {
-    const now = Date.now();
-    for (const [key, exp] of this.processing) {
-      if (exp < now) this.processing.delete(key);
+  private async sendNotification(
+    data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
+  ): Promise<void> {
+    if (!this.botManager) return;
+
+    const guildId: string = data.guildId || '0';
+    const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
+
+    const fullData: GiveawayData = {
+      ...data,
+      id: undefined,
+      status: 'active',
+      notifiedAt: null,
+      lastSeenAt: Date.now(),
+      inviteUrl: cachedInvite,
+    };
+
+    const sent = await this.botManager.sendGiveawayNotification(fullData);
+    if (sent) {
+      this.stats.notified++;
+      await markNotified(data.messageId, data.channelId);
+    } else {
+      this.stats.errors++;
     }
-    for (const [key, exp] of this.fingerprints) {
-      if (exp < now) this.fingerprints.delete(key);
-    }
+
+    this.fetchInviteForGuild(guildId).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
-  // Stats & shutdown
+  // Statistics and shutdown
   // -------------------------------------------------------------------------
   public getStats() {
     return { ...this.stats, uptime: Date.now() - this.stats.startedAt };
@@ -568,17 +562,20 @@ export class GiveawayManager extends EventEmitter {
     const s = this.stats;
     const uptime = (Date.now() - s.startedAt) / 1000;
     this.log.info(`── ${this.accountLabel} Stats ──────────────────────────`);
-    this.log.info(`  Detected : ${s.detected}  Notified : ${s.notified}  Skipped : ${s.skipped}`);
-    this.log.info(`  Errors   : ${s.errors}  FalsePos : ${s.falsePositives}`);
-    this.log.info(`  Uptime   : ${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`);
+    this.log.info(`  Detected            : ${s.detected}`);
+    this.log.info(`  Notified            : ${s.notified}`);
+    this.log.info(`  Skipped (cooldown)  : ${s.skipped}`);
+    this.log.info(`  Errors              : ${s.errors}`);
+    this.log.info(`  False positives blocked: ${s.falsePositivesBlocked}`);
+    this.log.info(`  Uptime              : ${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`);
+    this.log.info(`────────────────────────────────────────────────────────`);
   }
 
   public resetStats(): void {
-    this.stats = { detected: 0, notified: 0, skipped: 0, errors: 0, falsePositives: 0, startedAt: Date.now() };
+    this.stats = { detected: 0, notified: 0, skipped: 0, errors: 0, falsePositivesBlocked: 0, startedAt: Date.now() };
   }
 
   public async shutdown(): Promise<void> {
-    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
     this.log.info(`Shutting down ${this.accountLabel}...`);
     this.logStats();
   }
