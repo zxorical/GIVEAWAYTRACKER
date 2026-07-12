@@ -292,16 +292,25 @@ export class GiveawayManager extends EventEmitter {
 
     const embed = message.embeds?.[0];
     if (embed) {
-      if (embed.title && GIVEAWAY_KEYWORDS.some(re => re.test(embed.title)))
+      const title: string | null | undefined = embed.title;
+      if (title && GIVEAWAY_KEYWORDS.some(re => re.test(title)))
         signals['TITLE_KEYWORD'] = GiveawaySignal.TITLE_KEYWORD;
-      if (embed.description && GIVEAWAY_KEYWORDS.some(re => re.test(embed.description)))
+
+      const description: string | null | undefined = embed.description;
+      if (description && GIVEAWAY_KEYWORDS.some(re => re.test(description)))
         signals['DESCRIPTION_KEYWORD'] = GiveawaySignal.DESCRIPTION_KEYWORD;
-      if (embed.footer?.text && /\bends\b|ends\s+in|expires\b/i.test(embed.footer.text))
+
+      const footerText: string | null | undefined = embed.footer?.text;
+      if (footerText && /\bends\b|ends\s+in|expires\b/i.test(footerText))
         signals['FOOTER_ENDS'] = GiveawaySignal.FOOTER_ENDS;
-      if (embed.author?.name && /\bgiveaway\b/i.test(embed.author.name))
+
+      const authorName: string | null | undefined = embed.author?.name;
+      if (authorName && /\bgiveaway\b/i.test(authorName))
         signals['AUTHOR_KNOWN'] = GiveawaySignal.AUTHOR_KNOWN;
+
       if (embed.color && [0xF1C40F, 0x7289DA, 0x2ECC71, 0xE91E63].includes(embed.color))
         signals['EMBED_COLOR'] = GiveawaySignal.EMBED_COLOR;
+
       if (embed.fields) {
         for (const field of embed.fields) {
           if (/\b(?:ends?\s+in|winners?|time\s+remaining)\b/i.test(field.name)) {
@@ -508,7 +517,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification (fixed type annotations)
+  // Notification
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
