@@ -32,6 +32,7 @@ export interface GiveawayData {
   lastSeenAt: number;
   inviteUrl?: string;
   notificationMessageId?: string;
+  detectionTimeMs?: number;
 }
 
 export interface GiveawayStats {
