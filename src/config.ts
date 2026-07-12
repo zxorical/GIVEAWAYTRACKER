@@ -58,11 +58,11 @@ export const CONFIG: AppConfig = {
   botToken: requireEnv('DISCORD_BOT_TOKEN'),
   trackerChannelId: requireEnv('TRACKER_CHANNEL_ID'),
   monitoredChannels: csvEnv('MONITORED_CHANNELS'),
-  dbPath: optionalEnv('DB_PATH', './data/giveaways.json'),
+  dbPath: optionalEnv('DB_PATH', './data/giveaways.json'), // legacy, not used with MongoDB
   logLevel: optionalEnv('LOG_LEVEL', 'info'),
   logDir: optionalEnv('LOG_DIR', './logs'),
   notificationCooldown: assertInt(
-    optionalEnv('NOTIFICATION_COOLDOWN', '300'),
+    optionalEnv('NOTIFICATION_COOLDOWN', '30'),
     'NOTIFICATION_COOLDOWN', 10, 3600
   ),
   statsIntervalMs: assertInt(
@@ -80,12 +80,18 @@ if (CONFIG.tokens.length === 0) {
   throw new Error('At least one token is required in DISCORD_TOKENS');
 }
 
+// Check for MongoDB (not required at config level since database.ts handles the error)
+const mongoUri = process.env.MONGO_URI;
+if (!mongoUri) {
+  console.warn('[Config] ⚠️  MONGO_URI not set — database will not connect');
+}
+
 console.log('[Config] Loaded successfully');
 console.log(`  - Accounts: ${CONFIG.tokens.length}`);
 console.log(`  - Bot Token: ${CONFIG.botToken ? '✅ Set' : '❌ Missing'}`);
 console.log(`  - Tracker Channel: ${CONFIG.trackerChannelId ? '✅ Set' : '❌ Missing'}`);
 console.log(`  - Monitored Channels: ${CONFIG.monitoredChannels.length || 'All'}`);
-console.log(`  - DB Path: ${CONFIG.dbPath}`);
+console.log(`  - MongoDB: ${mongoUri ? '✅ Set' : '❌ Missing'}`);
 console.log(`  - Log Level: ${CONFIG.logLevel}`);
 console.log(`  - Notification Cooldown: ${CONFIG.notificationCooldown}s`);
 console.log(`  - Admins: ${CONFIG.adminUserIds.length || 'None'}`);
