@@ -231,7 +231,7 @@ export class GiveawayManager extends EventEmitter {
 
       const detectionTime = Date.now() - receivedAt;
 
-      // Prepare data for storage & notification
+      // Store
       const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
         messageId: message.id,
         channelId: message.channel.id,
@@ -241,9 +241,19 @@ export class GiveawayManager extends EventEmitter {
         authorId: message.author?.id || '',
         prize: detected.prize,
         detectedAt: receivedAt,
-        endsAt: detected.endsAt, // now allows null
+        endsAt: detected.endsAt,
         detectionTimeMs: detectionTime,
       };
+
+      // FIX: Run save and notification in parallel, but handle failures gracefully
+      const savePromise = insertGiveaway(data);
+      const notifyPromise = this.sendNotification(data);
+
+      const inserted = await savePromise;
+      if (!inserted) {
+        // Save failed - duplicate or error
+        return;
+      }
 
       this.stats.detected++;
 
@@ -252,18 +262,8 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      // --- FIX 3: Run save and notification in parallel ---
-      const savePromise = insertGiveaway(data);
-      const notifyPromise = this.sendNotification(data);
-
-      const inserted = await savePromise;
-      if (!inserted) {
-        // Save failed – notification might still be in flight, but we abort marking as notified.
-        // We could also cancel the notification, but for simplicity we let it finish.
-        return;
-      }
-
-      await notifyPromise; // Wait for notification to complete before continuing
+      // Wait for notification to complete
+      await notifyPromise;
     } finally {
       this.processingMessages.delete(key);
     }
@@ -528,37 +528,46 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification
+  // Notification (FIXED: proper null checks and error handling)
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
     if (!this.botManager) return;
 
+    // FIX: Validate required fields before proceeding
+    if (!data.messageId || !data.channelId) {
+      this.log.warn('Cannot send notification: missing messageId or channelId');
+      return;
+    }
+
     const guildId: string = data.guildId || '0';
     const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
 
-    // Generate a temporary ID (string) – matches GiveawayData.id type now
-    const tempId = `temp-${data.messageId}`;
-
     const fullData: GiveawayData = {
       ...data,
-      id: tempId,                    // FIX 2: now a string
+      id: undefined,  // Will be assigned by MongoDB
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
       inviteUrl: cachedInvite,
     };
 
-    const sent = await this.botManager.sendGiveawayNotification(fullData);
-    if (sent) {
-      this.stats.notified++;
-      // FIX 1: use non-null assertion because messageId/channelId are always strings
-      await markNotified(data.messageId!, data.channelId!);
-    } else {
+    try {
+      const sent = await this.botManager.sendGiveawayNotification(fullData);
+      if (sent) {
+        this.stats.notified++;
+        // FIX: Use validated messageId and channelId
+        await markNotified(data.messageId, data.channelId);
+      } else {
+        this.stats.errors++;
+      }
+    } catch (error) {
       this.stats.errors++;
+      this.log.error(`Failed to send notification: ${formatError(error)}`);
     }
 
+    // Fetch invite in background (don't await)
     this.fetchInviteForGuild(guildId).catch(() => {});
   }
 
