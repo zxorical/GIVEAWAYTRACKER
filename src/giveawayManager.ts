@@ -231,7 +231,7 @@ export class GiveawayManager extends EventEmitter {
 
       const detectionTime = Date.now() - receivedAt;
 
-      // Store
+      // Prepare data for storage & notification
       const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
         messageId: message.id,
         channelId: message.channel.id,
@@ -245,7 +245,15 @@ export class GiveawayManager extends EventEmitter {
         detectionTimeMs: detectionTime,
       };
 
-      // FIX: Run save and notification in parallel, but handle failures gracefully
+      this.stats.detected++;
+
+      // Check cooldown before saving
+      if (await wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
+        this.stats.skipped++;
+        return;
+      }
+
+      // Run save and notification in parallel
       const savePromise = insertGiveaway(data);
       const notifyPromise = this.sendNotification(data);
 
@@ -255,15 +263,11 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      this.stats.detected++;
-
-      if (await wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
-        this.stats.skipped++;
-        return;
-      }
-
       // Wait for notification to complete
       await notifyPromise;
+    } catch (error) {
+      this.stats.errors++;
+      this.log.error(`Error handling message ${message.id}: ${formatError(error)}`);
     } finally {
       this.processingMessages.delete(key);
     }
@@ -528,7 +532,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification (FIXED: proper null checks and error handling)
+  // Notification - FIXED with proper null checks
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
@@ -546,7 +550,7 @@ export class GiveawayManager extends EventEmitter {
 
     const fullData: GiveawayData = {
       ...data,
-      id: undefined,  // Will be assigned by MongoDB
+      id: undefined,
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
@@ -557,7 +561,7 @@ export class GiveawayManager extends EventEmitter {
       const sent = await this.botManager.sendGiveawayNotification(fullData);
       if (sent) {
         this.stats.notified++;
-        // FIX: Use validated messageId and channelId
+        // FIX: Use validated messageId and channelId (now guaranteed strings)
         await markNotified(data.messageId, data.channelId);
       } else {
         this.stats.errors++;
