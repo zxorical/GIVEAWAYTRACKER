@@ -17,6 +17,7 @@ import { MongoClient, Db, Collection, AnyBulkWriteOperation } from 'mongodb';
 import { logger } from './logger.js';
 import { GiveawayData, GiveawayStats } from './types.js';
 
+// FIX: Remove 'unknown' from status - only allow 'active' | 'ended'
 interface StoredGiveaway {
   messageId: string;
   channelId: string;
@@ -27,7 +28,7 @@ interface StoredGiveaway {
   prize: string;
   detectedAt: number;
   endsAt: number | null;
-  status: 'active' | 'ended' | 'unknown';
+  status: 'active' | 'ended';  // FIX: removed 'unknown'
   notifiedAt: number | null;
   lastSeenAt: number;
   notificationMessageId?: string;
@@ -258,6 +259,8 @@ export async function markNotified(messageId: string, channelId: string): Promis
   const entry = cache.get(key);
   if (entry) {
     entry.notifiedAt = Date.now();
+    entry.notificationStatus = 'sent';
+    entry.notificationSentAt = Date.now();
     markDirty(key);
   }
 }
@@ -423,6 +426,7 @@ export async function closeDb(): Promise<void> {
   }
 }
 
+// FIX: Update rowToGiveaway to map all fields including notification tracking
 function rowToGiveaway(row: StoredGiveaway): GiveawayData {
   return {
     messageId: row.messageId,
@@ -438,5 +442,9 @@ function rowToGiveaway(row: StoredGiveaway): GiveawayData {
     notifiedAt: row.notifiedAt,
     lastSeenAt: row.lastSeenAt,
     notificationMessageId: row.notificationMessageId,
+    // Include notification tracking fields if they exist in GiveawayData
+    ...(row.notificationStatus && { notificationStatus: row.notificationStatus }),
+    ...(row.notificationSentAt && { notificationSentAt: row.notificationSentAt }),
+    ...(row.notificationError && { notificationError: row.notificationError }),
   };
 }
