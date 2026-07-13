@@ -1,7 +1,7 @@
 /**
  * @module index
  * Application entry point – multi-account giveaway tracker
- * With health server and robust error handling.
+ * With extra logging to diagnose login issues.
  */
 
 import http from 'http';
@@ -43,11 +43,13 @@ healthServer.on('error', (err) => console.error('[Bootstrap] Health server error
 // GLOBAL ERROR HANDLERS
 // ----------------------------------------------------------------------------
 process.on('uncaughtException', (err) => {
+  console.error('🔥 UNCAUGHT EXCEPTION:', err);
   try { logger.error('Uncaught exception', { component: 'Process', error: err }); } catch {}
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
+  console.error('🔥 UNHANDLED REJECTION:', reason);
   try { logger.warn('Unhandled rejection', { component: 'Process', reason: formatError(reason) }); } catch {}
 });
 
@@ -86,7 +88,7 @@ async function main(): Promise<void> {
   getDb();
   cleanupOldGiveaways(30);
 
-  // Init BotManager (notification sender)
+  // Init BotManager
   botManager = new BotManager(CONFIG.botToken);
   await botManager.start();
   logger.info('BotManager started.', { component: 'Bootstrap' });
@@ -109,15 +111,36 @@ async function main(): Promise<void> {
       });
 
       const client = new Client();
-      const manager = new GiveawayManager(client, logger, token, label, botManager);
 
+      // --- ADD LOGGING FOR CLIENT EVENTS ---
+      client.on('debug', (info) => {
+        logger.debug(`[${label}] Debug: ${info}`, { component: 'Client' });
+      });
+
+      client.on('ready', () => {
+        logger.info(`[${label}] Client ready event fired`, { component: 'Client' });
+      });
+
+      client.on('error', (err) => {
+        logger.error(`[${label}] Client error event: ${formatError(err)}`, { component: 'Client' });
+      });
+
+      client.on('disconnect', () => {
+        logger.warn(`[${label}] Disconnected`, { component: 'Client' });
+      });
+
+      const manager = new GiveawayManager(client, logger, token, label, botManager);
       registerDiscordEvents(client, manager);
 
-      // Login with timeout
+      logger.info(`[${label}] Calling waitForReady...`, { component: 'Bootstrap' });
+
+      // Login with timeout and extra logging
       await Promise.race([
-        waitForReady(client, token),
+        waitForReady(client, token, label),
         timeout(CLIENT_READY_TIMEOUT_MS, `Client ${label} did not become ready`),
       ]);
+
+      logger.info(`[${label}] waitForReady resolved successfully`, { component: 'Bootstrap' });
 
       activeManagers.push(manager);
 
@@ -229,18 +252,38 @@ function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
 }
 
 // ----------------------------------------------------------------------------
-// HELPERS
+// HELPERS – with extra logging
 // ----------------------------------------------------------------------------
-function waitForReady(client: Client, token: string): Promise<void> {
+function waitForReady(client: Client, token: string, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    client.once('ready', () => resolve());
-    client.once('error', (err) => reject(err));
-    client.login(token).catch((err) => reject(new Error(`Login failed: ${formatError(err)}`)));
+    console.log(`[${label}] waitForReady: setting up listeners and calling login...`);
+    client.once('ready', () => {
+      console.log(`[${label}] waitForReady: ready event received`);
+      resolve();
+    });
+    client.once('error', (err) => {
+      console.error(`[${label}] waitForReady: error event received`, err);
+      reject(err);
+    });
+    client.login(token)
+      .then(() => {
+        console.log(`[${label}] waitForReady: client.login() resolved`);
+      })
+      .catch((err) => {
+        console.error(`[${label}] waitForReady: client.login() rejected`, err);
+        reject(new Error(`Login failed: ${formatError(err)}`));
+      });
   });
 }
 
 function timeout(ms: number, message: string): Promise<never> {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
+  return new Promise((_, reject) => {
+    console.log(`Starting timeout of ${ms}ms with message: ${message}`);
+    setTimeout(() => {
+      console.error(`Timeout triggered: ${message}`);
+      reject(new Error(message));
+    }, ms);
+  });
 }
 
 // ----------------------------------------------------------------------------
