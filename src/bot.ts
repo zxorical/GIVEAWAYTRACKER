@@ -1,7 +1,6 @@
 /**
  * @module bot
  * Production bot – notification queue, retries, metrics, event‑driven.
- * Now with login timeout and graceful failure.
  */
 
 import {
@@ -99,7 +98,7 @@ interface NotificationJob {
   data: GiveawayData;
   attempt: number;
   maxRetries: number;
-  messageId: string; // giveaway message ID
+  messageId: string;
 }
 
 class NotificationService {
@@ -120,8 +119,6 @@ class NotificationService {
       return;
     }
     this.dedupSet.add(data.messageId);
-
-    // Attach inviteUrl to data for later use
     (data as any).cachedInviteUrl = inviteUrl;
 
     this.queue.push({
@@ -145,7 +142,6 @@ class NotificationService {
           messageId: job.messageId,
           error: formatError(err),
         });
-        // Update failure in DB (if function exists)
         try {
           await updateNotificationStatus?.(job.messageId, job.data.channelId, {
             notificationStatus: 'failed',
@@ -244,7 +240,6 @@ class NotificationService {
     });
     this.metrics.recordNotification(true, Date.now() - start);
 
-    // Update DB
     await setNotificationMessageId(data.messageId, data.channelId, sentMessage.id);
     try {
       await updateNotificationStatus?.(data.messageId, data.channelId, {
@@ -298,7 +293,6 @@ export class BotManager {
   public metrics = new MetricsCollector();
   public notifications: NotificationService;
 
-  // Command handler map – populated in constructor
   private commands = new Map<string, (interaction: ChatInputCommandInteraction<CacheType>) => Promise<void>>();
 
   constructor(private readonly botToken: string) {
@@ -313,7 +307,6 @@ export class BotManager {
 
     this.notifications = new NotificationService(this.client, this.metrics);
 
-    // Define commands
     this.commands.set('stats', this.statsCommand.bind(this));
     this.commands.set('active', this.activeCommand.bind(this));
     this.commands.set('recent', this.recentCommand.bind(this));
@@ -325,7 +318,6 @@ export class BotManager {
     this.commands.set('panel', this.panelCommand.bind(this));
     this.commands.set('purge', this.purgeCommand.bind(this));
 
-    // Discord events
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
       await this.updatePresence();
@@ -362,10 +354,9 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Public API – called by giveawayManager
+  // Public API
   // -------------------------------------------------------------------------
   public async sendGiveawayNotification(data: GiveawayData & { inviteUrl?: string }): Promise<boolean> {
-    const start = Date.now();
     this.notifications.enqueue(data, data.inviteUrl || '');
     this.metrics.recordDetection(Date.now() - data.detectedAt);
     await this.updatePresence();
@@ -373,10 +364,10 @@ export class BotManager {
   }
 
   // ================================================================
-  // FIX: Login with timeout and proper error propagation
+  // FIXED: start() with timeout and proper ready event handling
   // ================================================================
   async start(): Promise<void> {
-    const LOGIN_TIMEOUT_MS = 10000; // 10 seconds
+    const LOGIN_TIMEOUT_MS = 10000;
 
     logger.info('BotManager: attempting login...', { component: 'BotManager' });
 
@@ -389,13 +380,13 @@ export class BotManager {
         ),
       ]);
 
-      // Wait for ready event (with a timeout as well)
+      // Wait for ready event – FIX: resolve() with no argument
       await Promise.race([
         new Promise<void>((resolve) => {
           if (this.client.isReady()) {
             resolve();
           } else {
-            this.client.once('ready', resolve);
+            this.client.once('ready', () => resolve());
           }
         }),
         new Promise((_, reject) =>
@@ -406,7 +397,7 @@ export class BotManager {
       logger.info('BotManager started successfully', { component: 'BotManager' });
     } catch (err) {
       logger.error(`BotManager start failed: ${formatError(err)}`, { component: 'BotManager' });
-      throw err; // rethrow so the caller knows
+      throw err;
     }
   }
 
