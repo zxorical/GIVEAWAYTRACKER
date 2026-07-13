@@ -1,6 +1,7 @@
 /**
  * @module index
  * Application entry point – multi-account giveaway tracker
+ * With health server and robust error handling.
  */
 
 import http from 'http';
@@ -15,6 +16,9 @@ import { BotManager } from './bot.js';
 import { delay, formatError, formatDuration } from './utils.js';
 import { getDb, closeDb, cleanupOldGiveaways } from './database.js';
 
+// ----------------------------------------------------------------------------
+// HEALTH SERVER
+// ----------------------------------------------------------------------------
 const PORT = parseInt(process.env.PORT || '3000', 10) || 3000;
 const healthServer = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
@@ -35,6 +39,9 @@ healthServer.listen(PORT, '0.0.0.0', () => {
 });
 healthServer.on('error', (err) => console.error('[Bootstrap] Health server error:', err));
 
+// ----------------------------------------------------------------------------
+// GLOBAL ERROR HANDLERS
+// ----------------------------------------------------------------------------
 process.on('uncaughtException', (err) => {
   try { logger.error('Uncaught exception', { component: 'Process', error: err }); } catch {}
   process.exit(1);
@@ -44,6 +51,9 @@ process.on('unhandledRejection', (reason) => {
   try { logger.warn('Unhandled rejection', { component: 'Process', reason: formatError(reason) }); } catch {}
 });
 
+// ----------------------------------------------------------------------------
+// STATE
+// ----------------------------------------------------------------------------
 let activeManagers: GiveawayManager[] = [];
 let botManager: BotManager | null = null;
 let statsInterval: ReturnType<typeof setInterval> | null = null;
@@ -53,6 +63,9 @@ const CLIENT_READY_TIMEOUT_MS = 60000;
 const MAX_BOOT_RETRIES = 10;
 const BOOT_RETRY_DELAY_MS = 15000;
 
+// ----------------------------------------------------------------------------
+// MAIN
+// ----------------------------------------------------------------------------
 async function main(): Promise<void> {
   reconfigureLogger(CONFIG.logLevel, CONFIG.logDir);
 
@@ -69,12 +82,14 @@ async function main(): Promise<void> {
     dbPath: CONFIG.dbPath,
   });
 
+  // Connect DB
   getDb();
   cleanupOldGiveaways(30);
 
+  // Init BotManager (notification sender)
   botManager = new BotManager(CONFIG.botToken);
   await botManager.start();
-  logger.info('Bot started, waiting for managers...', { component: 'Bootstrap' });
+  logger.info('BotManager started.', { component: 'Bootstrap' });
 
   activeManagers = [];
   let authFailures = 0;
@@ -98,6 +113,7 @@ async function main(): Promise<void> {
 
       registerDiscordEvents(client, manager);
 
+      // Login with timeout
       await Promise.race([
         waitForReady(client, token),
         timeout(CLIENT_READY_TIMEOUT_MS, `Client ${label} did not become ready`),
@@ -164,6 +180,9 @@ async function main(): Promise<void> {
   });
 }
 
+// ----------------------------------------------------------------------------
+// DISCORD EVENT HANDLERS
+// ----------------------------------------------------------------------------
 function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('messageCreate', (msg: Message) => {
     if (!msg.guild) return;
@@ -209,6 +228,9 @@ function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('error', (err) => logger.error('Client error', { component: 'Events', error: err }));
 }
 
+// ----------------------------------------------------------------------------
+// HELPERS
+// ----------------------------------------------------------------------------
 function waitForReady(client: Client, token: string): Promise<void> {
   return new Promise((resolve, reject) => {
     client.once('ready', () => resolve());
@@ -221,6 +243,9 @@ function timeout(ms: number, message: string): Promise<never> {
   return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
 }
 
+// ----------------------------------------------------------------------------
+// SHUTDOWN
+// ----------------------------------------------------------------------------
 function registerShutdown(): void {
   const handle = async (signal: string): Promise<void> => {
     if (shuttingDown) { process.exit(1); }
@@ -235,7 +260,7 @@ function registerShutdown(): void {
     }
 
     if (botManager) {
-      logger.info('Shutting down bot...', { component: 'Shutdown' });
+      logger.info('Shutting down BotManager...', { component: 'Shutdown' });
       await botManager.destroy();
     }
 
@@ -249,6 +274,9 @@ function registerShutdown(): void {
   process.on('SIGTERM', () => handle('SIGTERM').catch(() => process.exit(1)));
 }
 
+// ----------------------------------------------------------------------------
+// BOOT LOOP
+// ----------------------------------------------------------------------------
 async function boot(): Promise<void> {
   let attempt = 0;
 
