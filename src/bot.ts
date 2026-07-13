@@ -1,6 +1,7 @@
 /**
  * @module bot
  * Production bot – notification queue, retries, metrics, event‑driven.
+ * Now with login timeout and graceful failure.
  */
 
 import {
@@ -371,8 +372,42 @@ export class BotManager {
     return true;
   }
 
+  // ================================================================
+  // FIX: Login with timeout and proper error propagation
+  // ================================================================
   async start(): Promise<void> {
-    await this.client.login(this.botToken);
+    const LOGIN_TIMEOUT_MS = 10000; // 10 seconds
+
+    logger.info('BotManager: attempting login...', { component: 'BotManager' });
+
+    try {
+      // Race login against timeout
+      await Promise.race([
+        this.client.login(this.botToken),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Login timed out after 10s')), LOGIN_TIMEOUT_MS)
+        ),
+      ]);
+
+      // Wait for ready event (with a timeout as well)
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          if (this.client.isReady()) {
+            resolve();
+          } else {
+            this.client.once('ready', resolve);
+          }
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Ready event timed out after 10s')), LOGIN_TIMEOUT_MS)
+        ),
+      ]);
+
+      logger.info('BotManager started successfully', { component: 'BotManager' });
+    } catch (err) {
+      logger.error(`BotManager start failed: ${formatError(err)}`, { component: 'BotManager' });
+      throw err; // rethrow so the caller knows
+    }
   }
 
   async destroy(): Promise<void> {
@@ -382,7 +417,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Commands (methods)
+  // Commands (methods) – unchanged
   // -------------------------------------------------------------------------
   private async statsCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     await deferReply(interaction, false);
