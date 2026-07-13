@@ -1,7 +1,6 @@
 /**
  * @module index
- * Application entry point – multi-account giveaway tracker
- * With extra logging to diagnose login issues.
+ * Application entry point – with BotManager timeout and fallback.
  */
 
 import http from 'http';
@@ -64,6 +63,7 @@ let shuttingDown = false;
 const CLIENT_READY_TIMEOUT_MS = 60000;
 const MAX_BOOT_RETRIES = 10;
 const BOOT_RETRY_DELAY_MS = 15000;
+const BOT_MANAGER_START_TIMEOUT_MS = 10000;
 
 // ----------------------------------------------------------------------------
 // MAIN
@@ -84,15 +84,38 @@ async function main(): Promise<void> {
     dbPath: CONFIG.dbPath,
   });
 
-  // Connect DB
-  getDb();
-  cleanupOldGiveaways(30);
+  // Connect DB (await)
+  await getDb();
+  logger.info('Database connection established', { component: 'Bootstrap' });
 
-  // Init BotManager
-  botManager = new BotManager(CONFIG.botToken);
-  await botManager.start();
-  logger.info('BotManager started.', { component: 'Bootstrap' });
+  // Cleanup old giveaways (fire and forget)
+  cleanupOldGiveaways(30).catch(err => logger.warn('cleanupOldGiveaways error', { error: err }));
 
+  // --------------------------------------------------------------------------
+  // START BOTMANAGER WITH TIMEOUT
+  // --------------------------------------------------------------------------
+  logger.info('Initializing BotManager...', { component: 'Bootstrap' });
+  try {
+    const startPromise = (async () => {
+      botManager = new BotManager(CONFIG.botToken);
+      await botManager.start();
+    })();
+    await Promise.race([
+      startPromise,
+      timeout(BOT_MANAGER_START_TIMEOUT_MS, 'BotManager.start() timed out'),
+    ]);
+    logger.info('BotManager started successfully.', { component: 'Bootstrap' });
+  } catch (err) {
+    logger.warn('BotManager failed to start (will continue without it):', {
+      component: 'Bootstrap',
+      error: formatError(err),
+    });
+    botManager = null;
+  }
+
+  // --------------------------------------------------------------------------
+  // START ACCOUNT CLIENTS
+  // --------------------------------------------------------------------------
   activeManagers = [];
   let authFailures = 0;
 
@@ -112,7 +135,7 @@ async function main(): Promise<void> {
 
       const client = new Client();
 
-      // --- ADD LOGGING FOR CLIENT EVENTS ---
+      // Debug / error events
       client.on('debug', (info) => {
         logger.debug(`[${label}] Debug: ${info}`, { component: 'Client' });
       });
@@ -125,16 +148,11 @@ async function main(): Promise<void> {
         logger.error(`[${label}] Client error event: ${formatError(err)}`, { component: 'Client' });
       });
 
-      client.on('disconnect', () => {
-        logger.warn(`[${label}] Disconnected`, { component: 'Client' });
-      });
-
       const manager = new GiveawayManager(client, logger, token, label, botManager);
       registerDiscordEvents(client, manager);
 
       logger.info(`[${label}] Calling waitForReady...`, { component: 'Bootstrap' });
 
-      // Login with timeout and extra logging
       await Promise.race([
         waitForReady(client, token, label),
         timeout(CLIENT_READY_TIMEOUT_MS, `Client ${label} did not become ready`),
@@ -252,7 +270,7 @@ function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
 }
 
 // ----------------------------------------------------------------------------
-// HELPERS – with extra logging
+// HELPERS
 // ----------------------------------------------------------------------------
 function waitForReady(client: Client, token: string, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -278,7 +296,6 @@ function waitForReady(client: Client, token: string, label: string): Promise<voi
 
 function timeout(ms: number, message: string): Promise<never> {
   return new Promise((_, reject) => {
-    console.log(`Starting timeout of ${ms}ms with message: ${message}`);
     setTimeout(() => {
       console.error(`Timeout triggered: ${message}`);
       reject(new Error(message));
