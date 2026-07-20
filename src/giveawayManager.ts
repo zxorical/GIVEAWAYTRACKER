@@ -239,6 +239,12 @@ export class GiveawayManager extends EventEmitter {
 
       const detectionTime = Date.now() - receivedAt;
 
+      // Get guild data for banner and icon
+      const guild = message.guild;
+      const guildIcon = guild?.iconURL({ size: 512 }) || null;
+      const guildBanner = (guild as any)?.bannerURL?.({ size: 1024 }) || null;
+      const memberCount = (guild as any)?.memberCount ?? null;
+
       const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
         messageId: message.id,
         channelId: message.channel.id,
@@ -250,6 +256,10 @@ export class GiveawayManager extends EventEmitter {
         detectedAt: receivedAt,
         endsAt: detected.endsAt,
         detectionTimeMs: detectionTime,
+        // Pass banner and icon data
+        guildIcon: guildIcon,
+        guildBanner: guildBanner,
+        memberCount: memberCount,
       };
 
       this.stats.detected++;
@@ -872,7 +882,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification - FIXED TO USE ACTUAL INVITES
+  // Notification - FIXED TO PASS BANNER AND THUMBNAIL
   // Returns the resolved invite URL so callers (e.g. watchlist DMs) can reuse
   // the exact same invite shown in the tracker channel.
   // -------------------------------------------------------------------------
@@ -913,6 +923,21 @@ export class GiveawayManager extends EventEmitter {
 
     this.log.debug(`Using invite URL for notification: ${inviteUrl}`);
 
+    // Get guild data for banner and icon (if not already in data)
+    let guildIcon = (data as any).guildIcon || null;
+    let guildBanner = (data as any).guildBanner || null;
+    let memberCount = (data as any).memberCount || null;
+
+    // If not passed, try to get from cache
+    if (!guildIcon || !guildBanner) {
+      const guild = this.client.guilds.cache.get(guildId);
+      if (guild) {
+        guildIcon = guildIcon || guild.iconURL({ size: 512 }) || null;
+        guildBanner = guildBanner || (guild as any).bannerURL?.({ size: 1024 }) || null;
+        memberCount = memberCount || (guild as any).memberCount ?? null;
+      }
+    }
+
     const fullData: GiveawayData = {
       ...data,
       id: undefined,
@@ -920,6 +945,10 @@ export class GiveawayManager extends EventEmitter {
       notifiedAt: null,
       lastSeenAt: Date.now(),
       inviteUrl: inviteUrl,
+      // Pass the banner and icon data
+      guildIcon: guildIcon,
+      guildBanner: guildBanner,
+      memberCount: memberCount,
     };
 
     try {
