@@ -308,16 +308,23 @@ export class GiveawayManager extends EventEmitter {
     // Send DMs in parallel
     const messageUrl = `https://discord.com/channels/${message.guild!.id}/${message.channel.id}/${message.id}`;
     
-    for (const userId of matchedUsers) {
-      await this.botManager.sendWatchlistNotification(
-        userId,
-        prize,
-        message.guild!.name,
-        (message.channel as any).name || 'unknown',
-        this.extractEndTimestamp(message),
-        messageUrl,
-        message.guild!.id
-      );
+    // Use a Set to deduplicate users
+    const uniqueUsers = [...new Set(matchedUsers)];
+    
+    for (const userId of uniqueUsers) {
+      try {
+        await this.botManager.sendWatchlistNotification(
+          userId,
+          prize,
+          message.guild!.name,
+          (message.channel as any).name || 'unknown',
+          this.extractEndTimestamp(message),
+          messageUrl,
+          message.guild!.id
+        );
+      } catch (err) {
+        this.log.debug(`Failed to send watchlist DM to ${userId}`, { error: formatError(err) });
+      }
     }
   }
 
@@ -585,7 +592,7 @@ export class GiveawayManager extends EventEmitter {
         (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
       ) as unknown as TextChannel[];
 
-      for (const channel of channels.values()) {
+      for (const channel of channels) {
         try {
           const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
           return invite.url;
