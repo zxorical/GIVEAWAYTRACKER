@@ -8,7 +8,6 @@ import {
   Client,
   Message,
   TextChannel,
-  Permissions,
 } from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
@@ -18,7 +17,6 @@ import {
   formatError,
   truncate,
   sanitizeForLog,
-  formatTimestamp,
 } from './utils.js';
 import {
   GiveawayData,
@@ -32,6 +30,7 @@ import {
   updateLastSeen,
   getGiveaway,
   markEnded,
+  getAllWatchlists,
 } from './database.js';
 import { BotManager } from './bot.js';
 
@@ -154,6 +153,7 @@ export class GiveawayManager extends EventEmitter {
     skipped: 0,
     errors: 0,
     falsePositivesBlocked: 0,
+    watchlistMatches: 0,
     startedAt: Date.now(),
   };
 
@@ -259,18 +259,84 @@ export class GiveawayManager extends EventEmitter {
 
       const inserted = await savePromise;
       if (!inserted) {
-        // Save failed - duplicate or error
         return;
       }
 
       // Wait for notification to complete
       await notifyPromise;
+
+      // Check watchlist matches (after saving, in background)
+      this.checkWatchlistMatches(message, detected.prize).catch(err => {
+        this.log.error('Watchlist check error', { error: formatError(err) });
+      });
+
     } catch (error) {
       this.stats.errors++;
       this.log.error(`Error handling message ${message.id}: ${formatError(error)}`);
     } finally {
       this.processingMessages.delete(key);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Watchlist Matching
+  // -------------------------------------------------------------------------
+  private async checkWatchlistMatches(message: Message, prize: string): Promise<void> {
+    if (!this.botManager) return;
+
+    const text = this.getGiveawayText(message).toLowerCase();
+    const allWatchlists = await getAllWatchlists();
+    
+    const matchedUsers: string[] = [];
+    const matchedItems: string[] = [];
+
+    for (const watchlist of allWatchlists) {
+      for (const item of watchlist.items) {
+        if (text.includes(item)) {
+          matchedUsers.push(watchlist.userId);
+          matchedItems.push(item);
+          break;
+        }
+      }
+    }
+
+    if (matchedUsers.length === 0) return;
+
+    this.stats.watchlistMatches += matchedUsers.length;
+    this.log.info(`Watchlist matches: ${matchedUsers.length} users for "${prize}"`);
+
+    // Send DMs in parallel
+    const messageUrl = `https://discord.com/channels/${message.guild!.id}/${message.channel.id}/${message.id}`;
+    
+    for (const userId of matchedUsers) {
+      await this.botManager.sendWatchlistNotification(
+        userId,
+        prize,
+        message.guild!.name,
+        (message.channel as any).name || 'unknown',
+        this.extractEndTimestamp(message),
+        messageUrl,
+        message.guild!.id
+      );
+    }
+  }
+
+  private getGiveawayText(message: Message): string {
+    const parts = [message.content || ''];
+    
+    for (const embed of message.embeds || []) {
+      if (embed.title) parts.push(embed.title);
+      if (embed.description) parts.push(embed.description);
+      if (embed.footer?.text) parts.push(embed.footer.text);
+      if (embed.fields) {
+        for (const field of embed.fields) {
+          parts.push(field.name);
+          parts.push(field.value);
+        }
+      }
+    }
+    
+    return parts.join(' ');
   }
 
   // -------------------------------------------------------------------------
@@ -324,7 +390,6 @@ export class GiveawayManager extends EventEmitter {
 
     const embed = message.embeds?.[0];
     if (embed) {
-      // FIX: Use nullish coalescing to handle null values safely
       const title = embed.title ?? '';
       const description = embed.description ?? '';
 
@@ -536,14 +601,13 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Notification - FIXED with proper null checks
+  // Notification
   // -------------------------------------------------------------------------
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
     if (!this.botManager) return;
 
-    // FIX: Extract and validate required fields
     const messageId = data.messageId;
     const channelId = data.channelId;
     
@@ -568,7 +632,6 @@ export class GiveawayManager extends EventEmitter {
       const sent = await this.botManager.sendGiveawayNotification(fullData);
       if (sent) {
         this.stats.notified++;
-        // FIX: Use validated variables (now guaranteed strings)
         await markNotified(messageId, channelId);
       } else {
         this.stats.errors++;
@@ -578,7 +641,6 @@ export class GiveawayManager extends EventEmitter {
       this.log.error(`Failed to send notification: ${formatError(error)}`);
     }
 
-    // Fetch invite in background (don't await)
     this.fetchInviteForGuild(guildId).catch(() => {});
   }
 
@@ -598,12 +660,21 @@ export class GiveawayManager extends EventEmitter {
     this.log.info(`  Skipped (cooldown)  : ${s.skipped}`);
     this.log.info(`  Errors              : ${s.errors}`);
     this.log.info(`  False positives blocked: ${s.falsePositivesBlocked}`);
+    this.log.info(`  Watchlist matches   : ${s.watchlistMatches}`);
     this.log.info(`  Uptime              : ${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`);
     this.log.info(`────────────────────────────────────────────────────────`);
   }
 
   public resetStats(): void {
-    this.stats = { detected: 0, notified: 0, skipped: 0, errors: 0, falsePositivesBlocked: 0, startedAt: Date.now() };
+    this.stats = { 
+      detected: 0, 
+      notified: 0, 
+      skipped: 0, 
+      errors: 0, 
+      falsePositivesBlocked: 0,
+      watchlistMatches: 0,
+      startedAt: Date.now() 
+    };
   }
 
   public async shutdown(): Promise<void> {
