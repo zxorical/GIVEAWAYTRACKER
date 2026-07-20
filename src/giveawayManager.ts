@@ -164,6 +164,9 @@ export class GiveawayManager extends EventEmitter {
     startedAt: Date.now(),
   };
 
+  // Invite refresher interval
+  private inviteRefresherInterval: NodeJS.Timeout | null = null;
+
   constructor(
     client: Client,
     log: AppLogger,
@@ -177,6 +180,9 @@ export class GiveawayManager extends EventEmitter {
     this.accountLabel = accountLabel;
     this.botManager = botManager;
     this.userToken = token;
+
+    // Start the invite refresher
+    this.startInviteRefresher();
   }
 
   // -------------------------------------------------------------------------
@@ -653,8 +659,9 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Cached invite
+  // INVITE GENERATION - FIXED
   // -------------------------------------------------------------------------
+  
   private getCachedInvite(guildId: string): string | null {
     const cached = this.inviteCache.get(guildId);
     if (cached && cached.expiresAt > Date.now()) {
@@ -665,16 +672,20 @@ export class GiveawayManager extends EventEmitter {
   }
 
   private setCachedInvite(guildId: string, url: string): void {
+    // Cache for 30 minutes
     this.inviteCache.set(guildId, { url, expiresAt: Date.now() + 30 * 60 * 1000 });
   }
 
   private async fetchInviteForGuild(guildId: string): Promise<string> {
+    // Check cache first
     const cached = this.getCachedInvite(guildId);
     if (cached) return cached;
 
+    // Check pending requests to avoid duplicates
     const pending = this.pendingInvites.get(guildId);
     if (pending) return pending;
 
+    // Start new fetch
     const promise = this.doFetchInvite(guildId);
     this.pendingInvites.set(guildId, promise);
 
@@ -692,43 +703,162 @@ export class GiveawayManager extends EventEmitter {
   private async doFetchInvite(guildId: string): Promise<string> {
     try {
       const guild = this.client.guilds.cache.get(guildId);
-      if (!guild) return 'Server not reachable';
+      if (!guild) {
+        this.log.warn(`Guild ${guildId} not found in cache`);
+        return `https://discord.com/channels/${guildId}`;
+      }
 
+      this.log.debug(`Generating invite for guild: ${guild.name} (${guildId})`);
+
+      // Try 1: Fetch existing invites
       try {
         const invites = await guild.invites.fetch();
-        if (invites?.size > 0) {
+        if (invites && invites.size > 0) {
+          // Prefer permanent invites (no expiration, no usage limit)
           const permanent = invites.find(inv => inv.maxAge === 0 && inv.maxUses === 0);
-          return permanent ? permanent.url : invites.first()!.url;
+          if (permanent) {
+            this.log.debug(`Using permanent invite for ${guild.name}: ${permanent.url}`);
+            return permanent.url;
+          }
+          
+          // If no permanent invite, use the first one
+          const firstInvite = invites.first();
+          if (firstInvite) {
+            this.log.debug(`Using existing invite for ${guild.name}: ${firstInvite.url}`);
+            return firstInvite.url;
+          }
         }
-      } catch {}
+      } catch (error) {
+        this.log.debug(`Could not fetch existing invites for ${guild.name}: ${formatError(error)}`);
+      }
 
+      // Try 2: Vanity URL
       try {
-        const vanity = (guild as any).vanityURLCode;
-        if (vanity) return `https://discord.gg/${vanity}`;
-      } catch {}
+        const vanityCode = (guild as any).vanityURLCode;
+        if (vanityCode) {
+          const vanityUrl = `https://discord.gg/${vanityCode}`;
+          this.log.debug(`Using vanity URL for ${guild.name}: ${vanityUrl}`);
+          return vanityUrl;
+        }
+      } catch (error) {
+        this.log.debug(`No vanity URL for ${guild.name}: ${formatError(error)}`);
+      }
 
-      const channels = guild.channels.cache.filter(
+      // Try 3: Create new invite
+      const textChannels = guild.channels.cache.filter(
         (ch): ch is TextChannel => ch.type === 'GUILD_TEXT'
-      ) as unknown as TextChannel[];
+      );
 
-      for (const channel of channels) {
+      if (textChannels.size === 0) {
+        this.log.warn(`No text channels found in ${guild.name}`);
+        return `https://discord.com/channels/${guildId}`;
+      }
+
+      // Get the bot's member to check permissions
+      const botMember = guild.members.cache.get(this.client.user?.id || '');
+      if (!botMember) {
+        this.log.warn(`Bot not found in ${guild.name}`);
+        return `https://discord.com/channels/${guildId}`;
+      }
+
+      // Try channels in order of permissions
+      for (const [, channel] of textChannels) {
         try {
-          const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: 'Giveaway tracker' });
+          // Check if bot has permission to create invites
+          const permissions = channel.permissionsFor(botMember);
+          if (!permissions || !permissions.has('CREATE_INSTANT_INVITE')) {
+            this.log.debug(`No CREATE_INSTANT_INVITE permission in #${channel.name}`);
+            continue;
+          }
+
+          const invite = await channel.createInvite({
+            maxAge: 0, // Never expire
+            maxUses: 0, // Unlimited uses
+            reason: 'Giveaway tracker - auto-generated invite',
+            temporary: false,
+          });
+          
+          this.log.debug(`Created new invite for ${guild.name} in #${channel.name}: ${invite.url}`);
+          return invite.url;
+        } catch (error) {
+          this.log.debug(`Failed to create invite in #${channel.name}: ${formatError(error)}`);
+          continue;
+        }
+      }
+
+      // Try 4: Use any channel with permission
+      for (const [, channel] of textChannels) {
+        try {
+          // Try without permission check as fallback
+          const invite = await channel.createInvite({
+            maxAge: 0,
+            maxUses: 0,
+            reason: 'Giveaway tracker - auto-generated invite (fallback)',
+            temporary: false,
+          });
+          
+          this.log.debug(`Created fallback invite for ${guild.name} in #${channel.name}: ${invite.url}`);
           return invite.url;
         } catch {
           continue;
         }
       }
 
+      // Final fallback: channel link
+      this.log.warn(`Could not create invite for ${guild.name}, using channel link fallback`);
       return `https://discord.com/channels/${guildId}`;
-    } catch {
+
+    } catch (error) {
+      this.log.error(`Failed to generate invite for guild ${guildId}: ${formatError(error)}`);
       return `https://discord.com/channels/${guildId}`;
     }
   }
 
   // -------------------------------------------------------------------------
-  // Notification
+  // Invite Refresher
   // -------------------------------------------------------------------------
+  
+  private startInviteRefresher(): void {
+    // Clear any existing interval
+    if (this.inviteRefresherInterval) {
+      clearInterval(this.inviteRefresherInterval);
+    }
+
+    // Refresh invites every 5 minutes
+    this.inviteRefresherInterval = setInterval(() => {
+      this.refreshInvites().catch((err) => {
+        this.log.debug(`Invite refresh error: ${formatError(err)}`);
+      });
+    }, 5 * 60 * 1000);
+
+    // Don't let the interval keep the process alive
+    if (this.inviteRefresherInterval.unref) {
+      this.inviteRefresherInterval.unref();
+    }
+  }
+
+  private async refreshInvites(): Promise<void> {
+    const now = Date.now();
+    const expired = Array.from(this.inviteCache.entries())
+      .filter(([, cached]) => cached.expiresAt <= now);
+
+    if (expired.length === 0) return;
+
+    this.log.debug(`Refreshing ${expired.length} expired invites`);
+    
+    for (const [guildId] of expired) {
+      this.inviteCache.delete(guildId);
+      // Async refresh in background
+      this.fetchInviteForGuild(guildId).catch((err) => {
+        this.log.debug(`Failed to refresh invite for ${guildId}: ${formatError(err)}`);
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Notification - FIXED TO USE ACTUAL INVITES
+  // -------------------------------------------------------------------------
+  
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
   ): Promise<void> {
@@ -743,7 +873,27 @@ export class GiveawayManager extends EventEmitter {
     }
 
     const guildId: string = data.guildId || '0';
-    const cachedInvite: string = this.getCachedInvite(guildId) ?? `https://discord.com/channels/${guildId}`;
+    
+    // ACTUALLY generate the invite instead of using fallback
+    let inviteUrl: string;
+    try {
+      this.log.debug(`Generating invite for guild ${guildId} (${data.guildName})`);
+      inviteUrl = await this.fetchInviteForGuild(guildId);
+      
+      // Validate the invite URL
+      if (!inviteUrl || 
+          inviteUrl.includes('unavailable') || 
+          inviteUrl.includes('not reachable') ||
+          inviteUrl.includes('undefined')) {
+        this.log.warn(`Invalid invite URL for guild ${guildId}, using channel link fallback`);
+        inviteUrl = `https://discord.com/channels/${guildId}`;
+      }
+    } catch (error) {
+      this.log.warn(`Failed to generate invite for guild ${guildId}: ${formatError(error)}`);
+      inviteUrl = `https://discord.com/channels/${guildId}`;
+    }
+
+    this.log.debug(`Using invite URL for notification: ${inviteUrl}`);
 
     const fullData: GiveawayData = {
       ...data,
@@ -751,7 +901,7 @@ export class GiveawayManager extends EventEmitter {
       status: 'active',
       notifiedAt: null,
       lastSeenAt: Date.now(),
-      inviteUrl: cachedInvite,
+      inviteUrl: inviteUrl,
     };
 
     try {
@@ -759,15 +909,15 @@ export class GiveawayManager extends EventEmitter {
       if (sent) {
         this.stats.notified++;
         await markNotified(messageId, channelId);
+        this.log.debug(`Notification sent successfully for ${data.prize}`);
       } else {
         this.stats.errors++;
+        this.log.warn(`Failed to send notification for ${data.prize}`);
       }
     } catch (error) {
       this.stats.errors++;
       this.log.error(`Failed to send notification: ${formatError(error)}`);
     }
-
-    this.fetchInviteForGuild(guildId).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
@@ -788,6 +938,7 @@ export class GiveawayManager extends EventEmitter {
     this.log.info(`  False positives blocked: ${s.falsePositivesBlocked}`);
     this.log.info(`  Watchlist matches   : ${s.watchlistMatches}`);
     this.log.info(`  Uptime              : ${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`);
+    this.log.info(`  Invites cached      : ${this.inviteCache.size}`);
     this.log.info(`────────────────────────────────────────────────────────`);
   }
 
@@ -804,6 +955,12 @@ export class GiveawayManager extends EventEmitter {
   }
 
   public async shutdown(): Promise<void> {
+    // Clear the invite refresher
+    if (this.inviteRefresherInterval) {
+      clearInterval(this.inviteRefresherInterval);
+      this.inviteRefresherInterval = null;
+    }
+
     this.log.info(`Shutting down ${this.accountLabel}...`);
     this.logStats();
   }
