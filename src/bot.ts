@@ -20,7 +20,6 @@ import {
   ChannelType,
   ButtonInteraction,
   ActivityType,
-  DMChannel,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -38,10 +37,8 @@ import {
   removeItem,
   getItems,
   clearItems,
-  getUsersForItem,
 } from './database.js';
 
-// ---------------------------------------------------------------------------
 declare function updateNotificationStatus(
   messageId: string,
   channelId: string,
@@ -369,24 +366,20 @@ export class BotManager {
     return true;
   }
 
-  // -------------------------------------------------------------------------
-  // Public method for watchlist DM notifications
-  // -------------------------------------------------------------------------
-  public async sendWatchlistNotification(
+  public async sendWatchlistDM(
     userId: string,
     prize: string,
     guildName: string,
     channelName: string,
     endsAt: number | null,
-    messageUrl: string,
-    guildId?: string
+    messageUrl: string
   ): Promise<void> {
     try {
       const user = await this.client.users.fetch(userId);
       if (!user) return;
 
-      const dmChannel = await user.createDM();
-      if (!dmChannel) return;
+      const dm = await user.createDM();
+      if (!dm) return;
 
       const embed = new EmbedBuilder()
         .setColor(0x5865F2)
@@ -409,16 +402,13 @@ export class BotManager {
             .setURL(messageUrl)
         );
 
-      await dmChannel.send({ embeds: [embed], components: [row] });
+      await dm.send({ embeds: [embed], components: [row] });
     } catch (err) {
       // User has DMs disabled or blocked the bot
       logger.debug(`Failed to send watchlist DM to ${userId}`, { error: formatError(err) });
     }
   }
 
-  // ================================================================
-  // start() with timeout and proper ready event handling
-  // ================================================================
   async start(): Promise<void> {
     const LOGIN_TIMEOUT_MS = 10000;
 
@@ -537,7 +527,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Existing Commands (unchanged)
+  // Existing Commands
   // -------------------------------------------------------------------------
   private async statsCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     await deferReply(interaction, false);
@@ -797,7 +787,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Command registration (REST)
+  // Command registration
   // -------------------------------------------------------------------------
   private async registerCommands(): Promise<void> {
     if (this.commandsRegistered) return;
@@ -819,7 +809,6 @@ export class BotManager {
         .addIntegerOption(opt => opt.setName('amount').setDescription('How many'))
         .setDefaultMemberPermissions(0),
       new SlashCommandBuilder().setName('help').setDescription('List commands'),
-      // Watchlist commands
       new SlashCommandBuilder()
         .setName('watch')
         .setDescription('Manage giveaway watchlist')
