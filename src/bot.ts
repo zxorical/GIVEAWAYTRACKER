@@ -230,7 +230,6 @@ class NotificationService {
     }
     row.addComponents(
       new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl),
-      new ButtonBuilder().setLabel('Jump').setStyle(ButtonStyle.Link).setURL(messageUrl),
     );
 
     const start = Date.now();
