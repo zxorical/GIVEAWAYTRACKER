@@ -267,10 +267,13 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      await notifyPromise;
+      // sendNotification returns the invite URL it generated/resolved for the
+      // main tracker message — reuse it for watchlist DMs so both surfaces
+      // show the identical invite link, instead of resolving it twice.
+      const inviteUrl = await notifyPromise;
 
       // Check watchlist matches using cached data
-      await this.checkWatchlistMatches(message, detected.prize);
+      await this.checkWatchlistMatches(message, detected.prize, inviteUrl);
 
     } catch (error) {
       this.stats.errors++;
@@ -284,7 +287,7 @@ export class GiveawayManager extends EventEmitter {
   // -------------------------------------------------------------------------
   // OPTIMIZED Watchlist Matching
   // -------------------------------------------------------------------------
-  private async checkWatchlistMatches(message: Message, prize: string): Promise<void> {
+  private async checkWatchlistMatches(message: Message, prize: string, inviteUrl: string): Promise<void> {
     if (!this.botManager) return;
 
     try {
@@ -321,7 +324,7 @@ export class GiveawayManager extends EventEmitter {
       const endsAt = this.extractEndTimestamp(message);
 
       // SEND DMS WITH OPTIMAL BATCHING
-      await this.sendWatchlistDMs(uniqueUsers, prize, message, endsAt, messageUrl);
+      await this.sendWatchlistDMs(uniqueUsers, prize, message, endsAt, messageUrl, inviteUrl);
 
     } catch (err) {
       this.log.error('Watchlist check error', { error: formatError(err) });
@@ -336,7 +339,8 @@ export class GiveawayManager extends EventEmitter {
     prize: string,
     message: Message,
     endsAt: number | null,
-    messageUrl: string
+    messageUrl: string,
+    inviteUrl: string
   ): Promise<void> {
     if (users.length === 0) return;
 
@@ -364,19 +368,31 @@ export class GiveawayManager extends EventEmitter {
     let sent = 0;
     let failed = 0;
 
+    const guild = message.guild!;
+    const guildIcon = guild.iconURL({ size: 512 }) || null;
+    const guildBanner = (guild as any).bannerURL?.({ size: 1024 }) || null;
+    const memberCount = (guild as any).memberCount ?? null;
+    const detectedAt = Date.now();
+
     for (let i = 0; i < users.length; i += batchSize) {
       const batch = users.slice(i, i + batchSize);
-      
+
       try {
         const results = await Promise.allSettled(
-          batch.map(userId => 
+          batch.map(userId =>
             this.botManager!.sendWatchlistDM(
               userId,
               prize,
-              message.guild!.name,
+              guild.name,
               (message.channel as any).name || 'unknown',
               endsAt,
-              messageUrl
+              messageUrl,
+              guild.id,       // guildId — previously missing, caused "No invite available" in DMs
+              guildIcon,
+              detectedAt,
+              inviteUrl,      // reuse invite already generated for the tracker channel message
+              guildBanner,
+              memberCount
             )
           )
         );
@@ -857,23 +873,25 @@ export class GiveawayManager extends EventEmitter {
 
   // -------------------------------------------------------------------------
   // Notification - FIXED TO USE ACTUAL INVITES
+  // Returns the resolved invite URL so callers (e.g. watchlist DMs) can reuse
+  // the exact same invite shown in the tracker channel.
   // -------------------------------------------------------------------------
   
   private async sendNotification(
     data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'>
-  ): Promise<void> {
-    if (!this.botManager) return;
+  ): Promise<string> {
+    const guildId: string = data.guildId || '0';
+
+    if (!this.botManager) return `https://discord.com/channels/${guildId}`;
 
     const messageId = data.messageId;
     const channelId = data.channelId;
     
     if (!messageId || !channelId) {
       this.log.warn('Cannot send notification: missing messageId or channelId');
-      return;
+      return `https://discord.com/channels/${guildId}`;
     }
 
-    const guildId: string = data.guildId || '0';
-    
     // ACTUALLY generate the invite instead of using fallback
     let inviteUrl: string;
     try {
@@ -918,6 +936,8 @@ export class GiveawayManager extends EventEmitter {
       this.stats.errors++;
       this.log.error(`Failed to send notification: ${formatError(error)}`);
     }
+
+    return inviteUrl;
   }
 
   // -------------------------------------------------------------------------
