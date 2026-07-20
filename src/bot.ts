@@ -187,7 +187,40 @@ class NotificationService {
     const guildIcon = guild?.iconURL({ size: 512 }) || null;
     const guildBanner = guild?.bannerURL({ size: 1024 }) || null;
     const memberCount = guild?.memberCount ?? null;
-    const inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite';
+    
+    // Get invite - try cached, then passed, then generate
+    let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite';
+    
+    // If no invite, try to generate one
+    if (inviteUrl === 'No invite' && data.guildId) {
+      try {
+        const guild = this.bot.guilds.cache.get(data.guildId);
+        if (guild) {
+          // Try existing invites first
+          const invites = await guild.invites.fetch().catch(() => new Map());
+          const existingInvite = invites.find(inv => inv.channelId === data.channelId && inv.maxUses === 0);
+          if (existingInvite) {
+            inviteUrl = existingInvite.url;
+          } else {
+            // Create new invite
+            const textChannel = guild.channels.cache.get(data.channelId);
+            if (textChannel?.isTextBased()) {
+              const perms = textChannel.permissionsFor(this.bot.user?.id || '');
+              if (perms?.has('CreateInstantInvite')) {
+                const newInvite = await textChannel.createInvite({
+                  maxAge: 86400,
+                  maxUses: 0,
+                  reason: 'Giveaway notification'
+                });
+                inviteUrl = newInvite.url;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.debug(`Could not generate invite for notification: ${formatError(err)}`);
+      }
+    }
 
     const endsAt = data.endsAt || Date.now() + 3600000;
     const endTimestamp = Math.floor(endsAt / 1000);
@@ -406,8 +439,52 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist DM - Same format as main notifications
+  // Helper: Resolve Invite URL
   // -------------------------------------------------------------------------
+  
+  private async resolveInviteUrl(guildId: string, channelId: string, fallbackInvite?: string | null): Promise<string> {
+    // If we already have a valid invite, use it
+    if (fallbackInvite && fallbackInvite.startsWith('http')) {
+      return fallbackInvite;
+    }
+
+    try {
+      const guild = this.client.guilds.cache.get(guildId);
+      if (!guild) return 'No invite available';
+
+      // Try to get existing invites first
+      const invites = await guild.invites.fetch().catch(() => new Map());
+      
+      // Find an invite for the specific channel that doesn't expire
+      const channelInvite = invites.find(inv => inv.channelId === channelId && inv.maxUses === 0);
+      if (channelInvite) {
+        return channelInvite.url;
+      }
+
+      // Try to create a new invite
+      const channel = guild.channels.cache.get(channelId);
+      if (channel && channel.isTextBased()) {
+        const permissions = channel.permissionsFor(this.client.user?.id || '');
+        if (permissions?.has('CreateInstantInvite')) {
+          const newInvite = await channel.createInvite({
+            maxAge: 86400, // 24 hours
+            maxUses: 0, // Unlimited
+            reason: 'Giveaway tracker invite'
+          });
+          return newInvite.url;
+        }
+      }
+    } catch (err) {
+      logger.debug(`Failed to resolve invite: ${formatError(err)}`);
+    }
+
+    return 'No invite available';
+  }
+
+  // -------------------------------------------------------------------------
+  // Watchlist DM - Same format as main notifications with invite generation
+  // -------------------------------------------------------------------------
+  
   public async sendWatchlistDM(
     userId: string,
     prize: string,
@@ -441,10 +518,19 @@ export class BotManager {
 
       if (!dmChannel) return false;
 
+      // Extract channel ID from message URL
+      const urlParts = messageUrl.split('/');
+      const channelId = urlParts[6] || '';
+
+      // Resolve the invite URL
+      let resolvedInvite = 'No invite available';
+      if (guildId && channelId) {
+        resolvedInvite = await this.resolveInviteUrl(guildId, channelId, inviteUrl);
+      }
+
       const endTimestamp = endsAt ? Math.floor(endsAt / 1000) : null;
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
-      const resolvedInvite = inviteUrl || 'No invite';
 
       const description = [
         `### Details`,
@@ -497,7 +583,7 @@ export class BotManager {
         components: [row]
       });
 
-      logger.debug(`Sent watchlist DM to ${userId}`);
+      logger.debug(`Sent watchlist DM to ${userId} with invite: ${resolvedInvite}`);
       return true;
     } catch (err) {
       const errorMsg = formatError(err);
@@ -515,6 +601,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Giveaway Ended Notification (DM)
   // -------------------------------------------------------------------------
+  
   public async sendGiveawayEndedDM(
     userId: string,
     prize: string,
@@ -656,6 +743,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Existing Commands
   // -------------------------------------------------------------------------
+  
   private async statsCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     await deferReply(interaction, false);
     const stats = await getStats();
@@ -826,6 +914,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Role Panel
   // -------------------------------------------------------------------------
+  
   private async sendRolePanel(): Promise<void> {
     const panelChannelId = process.env.PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
     const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
@@ -882,6 +971,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Presence
   // -------------------------------------------------------------------------
+  
   private async updatePresence() {
     const totalEver = await getTotalDetected();
     this.client.user?.setPresence({
@@ -893,6 +983,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Cleanup - Also sends ended notifications to watchlist users
   // -------------------------------------------------------------------------
+  
   private async purgeAndUpdatePresence() {
     const removed = await purgeEndedGiveaways();
     if (removed.length > 0) {
@@ -922,6 +1013,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Command registration
   // -------------------------------------------------------------------------
+  
   private async registerCommands(): Promise<void> {
     if (this.commandsRegistered) return;
     const commandData = [
