@@ -253,7 +253,7 @@ class NotificationService {
       memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
 
-    // Build the embed with thumbnail and banner
+    // Build the embed for the MAIN SERVER MESSAGE with thumbnail and banner
     const embed = new EmbedBuilder()
       .setAuthor({ 
         name: 'New Giveaway', 
@@ -264,12 +264,13 @@ class NotificationService {
       .setColor(0x5865F2)
       .setTimestamp(data.detectedAt);
 
-    // Set thumbnail (server icon) if available
+    // ✅ MAIN SERVER MESSAGE - Set thumbnail (server icon) if available
     if (guildIcon) {
       embed.setThumbnail(guildIcon);
     }
 
-    // Set banner (server banner) if available - displays as large image at bottom
+    // ✅ MAIN SERVER MESSAGE - Set banner (server banner) if available
+    // This will display as a large image at the bottom of the embed
     if (guildBanner) {
       embed.setImage(guildBanner);
     }
