@@ -288,10 +288,6 @@ class NotificationService {
         notificationMessageId: sentMessage.id,
       });
     } catch {}
-
-    // Fire off identical-format DMs to any watchlist users matching this giveaway.
-    // (Left as a hook — call site should invoke bot.sendWatchlistDM per matching user
-    // with the same guildBanner/memberCount so the DM embed is byte-for-byte identical.)
   }
 }
 
@@ -450,7 +446,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Helper: Resolve Invite URL
+  // Helper: Resolve Invite URL (same logic as sendOne, used by DMs too)
   // -------------------------------------------------------------------------
   
   private async resolveInviteUrl(guildId: string, channelId: string, fallbackInvite?: string | null): Promise<string> {
@@ -459,41 +455,40 @@ export class BotManager {
       return fallbackInvite;
     }
 
+    let inviteUrl = 'No invite available';
     try {
       const guild = this.client.guilds.cache.get(guildId);
-      if (!guild) return 'No invite available';
-
-      // Try to get existing invites first
-      const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
-      
-      // Find an invite for the specific channel that doesn't expire
-      const channelInvite = invites.find((inv: Invite) => inv.channelId === channelId && inv.maxUses === 0);
-      if (channelInvite) {
-        return channelInvite.url;
-      }
-
-      // Try to create a new invite
-      const channel = guild.channels.cache.get(channelId);
-      if (channel && channel.isTextBased() && 'createInvite' in channel) {
-        const permissions = channel.permissionsFor(this.client.user?.id || '');
-        if (permissions?.has('CreateInstantInvite')) {
-          const newInvite = await channel.createInvite({
-            maxAge: 86400, // 24 hours
-            maxUses: 0, // Unlimited
-            reason: 'Giveaway tracker invite'
-          });
-          return newInvite.url;
+      if (guild) {
+        // Try existing invites first
+        const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
+        const existingInvite = invites.find((inv: Invite) => inv.channelId === channelId && inv.maxUses === 0);
+        if (existingInvite) {
+          inviteUrl = existingInvite.url;
+        } else {
+          // Create new invite
+          const channel = guild.channels.cache.get(channelId);
+          if (channel && channel.isTextBased() && 'createInvite' in channel) {
+            const perms = channel.permissionsFor(this.client.user?.id || '');
+            if (perms?.has('CreateInstantInvite')) {
+              const newInvite = await channel.createInvite({
+                maxAge: 86400,
+                maxUses: 0,
+                reason: 'Giveaway notification'
+              });
+              inviteUrl = newInvite.url;
+            }
+          }
         }
       }
     } catch (err) {
       logger.debug(`Failed to resolve invite: ${formatError(err)}`);
     }
 
-    return 'No invite available';
+    return inviteUrl;
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist DM - EXACT same format as main tracker-channel notification
+  // Watchlist DM - Same format as main notifications with invite generation
   // -------------------------------------------------------------------------
   
   public async sendWatchlistDM(
