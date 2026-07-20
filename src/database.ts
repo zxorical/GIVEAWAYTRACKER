@@ -1,23 +1,12 @@
 /**
  * @module database
  * MongoDB-backed store with an in-memory cache for instant reads.
- *
- * Design:
- *  - All reads/writes hit an in-memory Map first (O(1), no scans).
- *  - Mutations mark documents "dirty"; a debounced flush batches them
- *    into a single bulkWrite so we don't hammer Mongo on every change
- *    and don't lose writes if the process exits mid-flight (flush is
- *    also run on close()).
- *  - Connection is guarded against concurrent callers via a shared
- *    in-flight promise.
- *  - Notification status fields added for tracking delivery state.
  */
 
 import { MongoClient, Db, Collection, AnyBulkWriteOperation } from 'mongodb';
 import { logger } from './logger.js';
-import { GiveawayData, GiveawayStats } from './types.js';
+import { GiveawayData, GiveawayStats, UserWatchlist } from './types.js';
 
-// FIX: Remove 'unknown' from status - only allow 'active' | 'ended'
 interface StoredGiveaway {
   messageId: string;
   channelId: string;
@@ -28,14 +17,13 @@ interface StoredGiveaway {
   prize: string;
   detectedAt: number;
   endsAt: number | null;
-  status: 'active' | 'ended';  // FIX: removed 'unknown'
+  status: 'active' | 'ended';
   notifiedAt: number | null;
   lastSeenAt: number;
   notificationMessageId?: string;
-  // Notification tracking fields
-  notificationStatus?: string;       // 'pending' | 'sent' | 'failed'
-  notificationSentAt?: number;       // timestamp when sent
-  notificationError?: string;        // error message if failed
+  notificationStatus?: string;
+  notificationSentAt?: number;
+  notificationError?: string;
 }
 
 interface TotalCounter {
@@ -54,19 +42,18 @@ let client: MongoClient;
 let db: Db;
 let giveawaysCol: Collection<StoredGiveaway>;
 let countersCol: Collection<TotalCounter>;
+let watchlistCol: Collection<UserWatchlist>;
 
 let connected = false;
 let connectingPromise: Promise<void> | null = null;
 
-// In-memory cache — instant reads/writes. Key: `${channelId}:${messageId}`
 const cache = new Map<string, StoredGiveaway>();
 let totalDetectedCount = 0;
 
-// Sync bookkeeping
 let syncTimeout: NodeJS.Timeout | null = null;
 let dirtyTotal = false;
 const dirtyKeys = new Set<string>();
-const pendingDeletes = new Set<string>(); // messageIds removed since last flush
+const pendingDeletes = new Set<string>();
 
 function cacheKey(messageId: string, channelId: string): string {
   return `${channelId}:${messageId}`;
@@ -83,11 +70,14 @@ async function connect(): Promise<void> {
       db = client.db('giveaway_tracker');
       giveawaysCol = db.collection<StoredGiveaway>('giveaways');
       countersCol = db.collection<TotalCounter>('counters');
+      watchlistCol = db.collection<UserWatchlist>('watchlists');
 
       await giveawaysCol.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
       await giveawaysCol.createIndex({ status: 1 });
       await giveawaysCol.createIndex({ detectedAt: -1 });
       await giveawaysCol.createIndex({ notificationStatus: 1 });
+      await watchlistCol.createIndex({ userId: 1 }, { unique: true });
+      await watchlistCol.createIndex({ items: 1 });
 
       const docs = await giveawaysCol.find({}).toArray();
       cache.clear();
@@ -136,11 +126,6 @@ function scheduleSync(): void {
   }, SYNC_INTERVAL_MS);
 }
 
-/**
- * Flush all pending writes/deletes/counter updates to MongoDB in one batch.
- * On failure, dirty markers are left in place so the next flush retries them
- * instead of silently dropping the write.
- */
 async function flushSync(): Promise<void> {
   syncTimeout = null;
   if (!connected) return;
@@ -155,7 +140,7 @@ async function flushSync(): Promise<void> {
       dirtyTotal = false;
     } catch (err) {
       logger.error('Failed to sync counter', { component: 'Database', error: String(err) });
-      scheduleSync(); // retry later
+      scheduleSync();
     }
   }
 
@@ -166,7 +151,7 @@ async function flushSync(): Promise<void> {
 
     for (const key of keys) {
       const doc = cache.get(key);
-      if (!doc) continue; // deleted locally before flush; handled below
+      if (!doc) continue;
       ops.push({
         updateOne: {
           filter: { messageId: doc.messageId, channelId: doc.channelId },
@@ -183,7 +168,6 @@ async function flushSync(): Promise<void> {
         for (const key of docsForKeys) dirtyKeys.delete(key);
       } catch (err) {
         logger.error('Failed to sync giveaways batch', { component: 'Database', error: String(err) });
-        // leave dirtyKeys intact so we retry on next flush
         scheduleSync();
       }
     }
@@ -202,7 +186,7 @@ async function flushSync(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Public API — all instant from cache
+// Existing Public API
 // ---------------------------------------------------------------------------
 
 export async function getDb(): Promise<Db> {
@@ -233,7 +217,7 @@ export async function insertGiveaway(
     status: 'active',
     notifiedAt: null,
     lastSeenAt: Date.now(),
-    notificationStatus: 'pending',  // mark as pending until notification is sent
+    notificationStatus: 'pending',
   };
 
   cache.set(key, doc);
@@ -296,10 +280,6 @@ export async function setNotificationMessageId(
   }
 }
 
-/**
- * Update notification status fields on a giveaway document.
- * Used by the bot's notification service to track delivery state.
- */
 export async function updateNotificationStatus(
   messageId: string,
   channelId: string,
@@ -385,7 +365,7 @@ export async function cleanupOldGiveaways(days: number = 30): Promise<void> {
   for (const [key, d] of cache) {
     if (d.status !== 'active' && d.detectedAt < cutoff) {
       cache.delete(key);
-      dirtyKeys.delete(key); // no point syncing a doc we're about to delete
+      dirtyKeys.delete(key);
     }
   }
 }
@@ -417,7 +397,6 @@ export async function closeDb(): Promise<void> {
     clearTimeout(syncTimeout);
     syncTimeout = null;
   }
-  // Make sure anything still pending gets written before we disconnect.
   await flushSync();
 
   if (client) {
@@ -426,7 +405,6 @@ export async function closeDb(): Promise<void> {
   }
 }
 
-// FIX: Update rowToGiveaway to map all fields including notification tracking
 function rowToGiveaway(row: StoredGiveaway): GiveawayData {
   return {
     messageId: row.messageId,
@@ -442,9 +420,71 @@ function rowToGiveaway(row: StoredGiveaway): GiveawayData {
     notifiedAt: row.notifiedAt,
     lastSeenAt: row.lastSeenAt,
     notificationMessageId: row.notificationMessageId,
-    // Include notification tracking fields if they exist in GiveawayData
     ...(row.notificationStatus && { notificationStatus: row.notificationStatus }),
     ...(row.notificationSentAt && { notificationSentAt: row.notificationSentAt }),
     ...(row.notificationError && { notificationError: row.notificationError }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Watchlist API
+// ---------------------------------------------------------------------------
+
+export async function addItem(userId: string, item: string): Promise<boolean> {
+  await ensureConnected();
+  
+  const result = await watchlistCol.updateOne(
+    { userId },
+    { 
+      $addToSet: { items: item.toLowerCase().trim() },
+      $set: { updatedAt: Date.now() },
+      $setOnInsert: { createdAt: Date.now() }
+    },
+    { upsert: true }
+  );
+  
+  return result.modifiedCount > 0 || result.upsertedCount > 0;
+}
+
+export async function removeItem(userId: string, item: string): Promise<boolean> {
+  await ensureConnected();
+  
+  const result = await watchlistCol.updateOne(
+    { userId },
+    { $pull: { items: item.toLowerCase().trim() } }
+  );
+  
+  return result.modifiedCount > 0;
+}
+
+export async function getItems(userId: string): Promise<string[]> {
+  await ensureConnected();
+  
+  const doc = await watchlistCol.findOne({ userId });
+  return doc?.items || [];
+}
+
+export async function getAllWatchlists(): Promise<UserWatchlist[]> {
+  await ensureConnected();
+  
+  return await watchlistCol.find({}).toArray();
+}
+
+export async function getUsersForItem(item: string): Promise<string[]> {
+  await ensureConnected();
+  
+  const docs = await watchlistCol.find({
+    items: item.toLowerCase().trim()
+  }).toArray();
+  
+  return docs.map(doc => doc.userId);
+}
+
+export async function clearItems(userId: string): Promise<void> {
+  await ensureConnected();
+  
+  await watchlistCol.updateOne(
+    { userId },
+    { $set: { items: [], updatedAt: Date.now() } }
+  );
 }
