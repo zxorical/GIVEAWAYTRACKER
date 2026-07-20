@@ -1,7 +1,6 @@
 /**
  * @module giveawayManager
  * Reliable giveaway detector — scans everything, misses nothing.
- * Original scoring system with performance caching.
  */
 
 import {
@@ -178,7 +177,6 @@ export class GiveawayManager extends EventEmitter {
   public async handleMessage(message: Message): Promise<void> {
     const receivedAt = Date.now();
 
-    // Fast‑path guards
     if (!message.guild) return;
     if (message.author?.id === this.client.user?.id) return;
 
@@ -191,7 +189,6 @@ export class GiveawayManager extends EventEmitter {
 
     if (!this.isAllowedBot(message)) return;
 
-    // Blocked content check
     const content = message.content || '';
     if (BLOCKED_MESSAGE_CONTENT.some(re => re.test(content))) {
       return;
@@ -204,7 +201,6 @@ export class GiveawayManager extends EventEmitter {
       }
     }
 
-    // Block duplicate processing
     const key = `${message.id}-${message.channel.id}`;
     if (this.processingMessages.has(key)) {
       return;
@@ -212,7 +208,6 @@ export class GiveawayManager extends EventEmitter {
     this.processingMessages.add(key);
 
     try {
-      // Deduplication
       const existing = await getGiveaway(message.id, message.channel.id);
       if (existing) {
         await updateLastSeen(message.id, message.channel.id);
@@ -222,7 +217,6 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      // Detection — full scan with retry
       const detected = await this.detectGiveaway(message);
       if (!detected) {
         this.stats.falsePositivesBlocked++;
@@ -231,7 +225,6 @@ export class GiveawayManager extends EventEmitter {
 
       const detectionTime = Date.now() - receivedAt;
 
-      // Prepare data for storage & notification
       const data: Omit<GiveawayData, 'id' | 'status' | 'notifiedAt' | 'lastSeenAt'> = {
         messageId: message.id,
         channelId: message.channel.id,
@@ -247,13 +240,11 @@ export class GiveawayManager extends EventEmitter {
 
       this.stats.detected++;
 
-      // Check cooldown before saving
       if (await wasNotifiedRecently(message.id, message.channel.id, CONFIG.notificationCooldown)) {
         this.stats.skipped++;
         return;
       }
 
-      // Run save and notification in parallel
       const savePromise = insertGiveaway(data);
       const notifyPromise = this.sendNotification(data);
 
@@ -262,13 +253,10 @@ export class GiveawayManager extends EventEmitter {
         return;
       }
 
-      // Wait for notification to complete
       await notifyPromise;
 
-      // Check watchlist matches (after saving, in background)
-      this.checkWatchlistMatches(message, detected.prize).catch(err => {
-        this.log.error('Watchlist check error', { error: formatError(err) });
-      });
+      // Check watchlist matches
+      await this.checkWatchlistMatches(message, detected.prize);
 
     } catch (error) {
       this.stats.errors++;
@@ -284,47 +272,44 @@ export class GiveawayManager extends EventEmitter {
   private async checkWatchlistMatches(message: Message, prize: string): Promise<void> {
     if (!this.botManager) return;
 
-    const text = this.getGiveawayText(message).toLowerCase();
-    const allWatchlists = await getAllWatchlists();
-    
-    const matchedUsers: string[] = [];
-    const matchedItems: string[] = [];
+    try {
+      const text = this.getGiveawayText(message).toLowerCase();
+      const allWatchlists = await getAllWatchlists();
+      
+      if (allWatchlists.length === 0) return;
 
-    for (const watchlist of allWatchlists) {
-      for (const item of watchlist.items) {
-        if (text.includes(item)) {
-          matchedUsers.push(watchlist.userId);
-          matchedItems.push(item);
-          break;
+      const matchedUsers: string[] = [];
+
+      for (const watchlist of allWatchlists) {
+        for (const item of watchlist.items) {
+          if (text.includes(item)) {
+            matchedUsers.push(watchlist.userId);
+            break;
+          }
         }
       }
-    }
 
-    if (matchedUsers.length === 0) return;
+      if (matchedUsers.length === 0) return;
 
-    this.stats.watchlistMatches += matchedUsers.length;
-    this.log.info(`Watchlist matches: ${matchedUsers.length} users for "${prize}"`);
+      const uniqueUsers = [...new Set(matchedUsers)];
+      this.stats.watchlistMatches += uniqueUsers.length;
+      this.log.info(`Watchlist matches: ${uniqueUsers.length} users for "${prize}"`);
 
-    // Send DMs in parallel
-    const messageUrl = `https://discord.com/channels/${message.guild!.id}/${message.channel.id}/${message.id}`;
-    
-    // Use a Set to deduplicate users
-    const uniqueUsers = [...new Set(matchedUsers)];
-    
-    for (const userId of uniqueUsers) {
-      try {
-        await this.botManager.sendWatchlistNotification(
+      const messageUrl = `https://discord.com/channels/${message.guild!.id}/${message.channel.id}/${message.id}`;
+      const endsAt = this.extractEndTimestamp(message);
+
+      for (const userId of uniqueUsers) {
+        await this.botManager.sendWatchlistDM(
           userId,
           prize,
           message.guild!.name,
           (message.channel as any).name || 'unknown',
-          this.extractEndTimestamp(message),
-          messageUrl,
-          message.guild!.id
+          endsAt,
+          messageUrl
         );
-      } catch (err) {
-        this.log.debug(`Failed to send watchlist DM to ${userId}`, { error: formatError(err) });
       }
+    } catch (err) {
+      this.log.error('Watchlist check error', { error: formatError(err) });
     }
   }
 
@@ -347,15 +332,13 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Detection — full scan with button retry
+  // Detection
   // -------------------------------------------------------------------------
   private async detectGiveaway(message: Message): Promise<DetectedGiveaway | null> {
-    // Try sync first
     let signals = this.collectSignalsSync(message);
     let score = Object.values(signals).reduce((sum, v) => sum + v, 0);
     let button = this.extractEntryButton(message);
 
-    // If no button found, retry with fetch
     if (!button) {
       await delay(200);
       try {
@@ -382,7 +365,7 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Signal collection (sync version — walks everything once)
+  // Signal collection
   // -------------------------------------------------------------------------
   private collectSignalsSync(message: Message): Record<string, number> {
     const signals: Record<string, number> = {};
