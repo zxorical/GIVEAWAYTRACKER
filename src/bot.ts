@@ -288,6 +288,10 @@ class NotificationService {
         notificationMessageId: sentMessage.id,
       });
     } catch {}
+
+    // Fire off identical-format DMs to any watchlist users matching this giveaway.
+    // (Left as a hook — call site should invoke bot.sendWatchlistDM per matching user
+    // with the same guildBanner/memberCount so the DM embed is byte-for-byte identical.)
   }
 }
 
@@ -489,7 +493,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist DM - Same format as main notifications with invite generation
+  // Watchlist DM - EXACT same format as main tracker-channel notification
   // -------------------------------------------------------------------------
   
   public async sendWatchlistDM(
@@ -502,7 +506,9 @@ export class BotManager {
     guildId?: string,
     guildIcon?: string | null,
     detectedAt?: number,
-    inviteUrl?: string | null
+    inviteUrl?: string | null,
+    guildBanner?: string | null,
+    memberCount?: number | null
   ): Promise<boolean> {
     try {
       let user;
@@ -526,8 +532,9 @@ export class BotManager {
       if (!dmChannel) return false;
 
       // Extract channel ID from message URL
+      // Format: https://discord.com/channels/{guildId}/{channelId}/{messageId}
       const urlParts = messageUrl.split('/');
-      const channelId = urlParts[6] || '';
+      const channelId = urlParts[5] || '';
 
       // Resolve the invite URL
       let resolvedInvite = 'No invite available';
@@ -535,10 +542,13 @@ export class BotManager {
         resolvedInvite = await this.resolveInviteUrl(guildId, channelId, inviteUrl);
       }
 
-      const endTimestamp = endsAt ? Math.floor(endsAt / 1000) : null;
+      const endTimestamp = endsAt
+        ? Math.floor(endsAt / 1000)
+        : Math.floor((Date.now() + 3600000) / 1000);
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
 
+      // Same description shape/order as sendOne
       const description = [
         `### Details`,
         `**Server:** ${guildName}`,
@@ -546,12 +556,12 @@ export class BotManager {
         `**Winners:** ${winnerCount}`,
         ``,
         `### Time`,
-        endTimestamp ? `**Ends:** <t:${endTimestamp}:F>` : '',
-        endTimestamp ? `**Countdown:** <t:${endTimestamp}:R>` : '',
+        `**Ends:** <t:${endTimestamp}:F>`,
+        `**Countdown:** <t:${endTimestamp}:R>`,
         ``,
         `### Links`,
         `**Invite:** ${resolvedInvite}`,
-        `[Jump to giveaway](${messageUrl})`,
+        memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
       ].filter(Boolean).join('\n');
 
       const embed = new EmbedBuilder()
@@ -559,30 +569,17 @@ export class BotManager {
         .setTitle(prize || 'Unknown Prize')
         .setDescription(description)
         .setColor(0x5865F2)
-        .setFooter({
-          text: `Match from your watchlist${detectionTime ? ` - Detected in ${detectionTime}ms` : ''}`,
-          iconURL: this.client.user?.displayAvatarURL()
-        })
-        .setTimestamp();
-
-      if (guildIcon) {
-        embed.setThumbnail(guildIcon);
-      }
+        .setThumbnail(guildIcon || null)
+        .setFooter({ text: `Detected in ${detectionTime}ms`, iconURL: this.client.user?.displayAvatarURL() })
+        .setTimestamp(detectedAt);
+      if (guildBanner) embed.setImage(guildBanner);
 
       const row = new ActionRowBuilder<ButtonBuilder>();
       if (resolvedInvite.startsWith('http')) {
-        row.addComponents(
-          new ButtonBuilder()
-            .setLabel('Join Server')
-            .setStyle(ButtonStyle.Link)
-            .setURL(resolvedInvite)
-        );
+        row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(resolvedInvite));
       }
       row.addComponents(
-        new ButtonBuilder()
-          .setLabel('View Giveaway')
-          .setStyle(ButtonStyle.Link)
-          .setURL(messageUrl)
+        new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl),
       );
 
       await dmChannel.send({
