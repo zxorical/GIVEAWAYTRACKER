@@ -20,6 +20,13 @@ import {
   ChannelType,
   ButtonInteraction,
   ActivityType,
+  Collection,
+  Invite,
+  GuildBasedChannel,
+  NewsChannel,
+  StageChannel,
+  VoiceChannel,
+  ThreadChannel,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -189,25 +196,25 @@ class NotificationService {
     const memberCount = guild?.memberCount ?? null;
     
     // Get invite - try cached, then passed, then generate
-    let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite';
+    let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite available';
     
     // If no invite, try to generate one
-    if (inviteUrl === 'No invite' && data.guildId) {
+    if (inviteUrl === 'No invite available' && data.guildId) {
       try {
         const guild = this.bot.guilds.cache.get(data.guildId);
         if (guild) {
           // Try existing invites first
-          const invites = await guild.invites.fetch().catch(() => new Map());
-          const existingInvite = invites.find(inv => inv.channelId === data.channelId && inv.maxUses === 0);
+          const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
+          const existingInvite = invites.find((inv: Invite) => inv.channelId === data.channelId && inv.maxUses === 0);
           if (existingInvite) {
             inviteUrl = existingInvite.url;
           } else {
             // Create new invite
-            const textChannel = guild.channels.cache.get(data.channelId);
-            if (textChannel?.isTextBased()) {
-              const perms = textChannel.permissionsFor(this.bot.user?.id || '');
+            const channel = guild.channels.cache.get(data.channelId);
+            if (channel && channel.isTextBased() && 'createInvite' in channel) {
+              const perms = channel.permissionsFor(this.bot.user?.id || '');
               if (perms?.has('CreateInstantInvite')) {
-                const newInvite = await textChannel.createInvite({
+                const newInvite = await channel.createInvite({
                   maxAge: 86400,
                   maxUses: 0,
                   reason: 'Giveaway notification'
@@ -453,17 +460,17 @@ export class BotManager {
       if (!guild) return 'No invite available';
 
       // Try to get existing invites first
-      const invites = await guild.invites.fetch().catch(() => new Map());
+      const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
       
       // Find an invite for the specific channel that doesn't expire
-      const channelInvite = invites.find(inv => inv.channelId === channelId && inv.maxUses === 0);
+      const channelInvite = invites.find((inv: Invite) => inv.channelId === channelId && inv.maxUses === 0);
       if (channelInvite) {
         return channelInvite.url;
       }
 
       // Try to create a new invite
       const channel = guild.channels.cache.get(channelId);
-      if (channel && channel.isTextBased()) {
+      if (channel && channel.isTextBased() && 'createInvite' in channel) {
         const permissions = channel.permissionsFor(this.client.user?.id || '');
         if (permissions?.has('CreateInstantInvite')) {
           const newInvite = await channel.createInvite({
