@@ -146,6 +146,14 @@ export class GiveawayManager extends EventEmitter {
   private inviteCache = new Map<string, { url: string; expiresAt: number }>();
   private pendingInvites = new Map<string, Promise<string>>();
 
+  // OPTIMIZATION: Cache watchlist items for faster lookups
+  private watchlistCache: Map<string, string[]> = new Map();
+  private watchlistCacheExpiry: number = 0;
+  private readonly WATCHLIST_CACHE_TTL = 60000; // 60 seconds
+
+  // OPTIMIZATION: Cache giveaway text to avoid rebuilding
+  private giveawayTextCache = new Map<string, string>();
+
   private stats = {
     detected: 0,
     notified: 0,
@@ -255,7 +263,7 @@ export class GiveawayManager extends EventEmitter {
 
       await notifyPromise;
 
-      // Check watchlist matches
+      // Check watchlist matches using cached data
       await this.checkWatchlistMatches(message, detected.prize);
 
     } catch (error) {
@@ -263,27 +271,35 @@ export class GiveawayManager extends EventEmitter {
       this.log.error(`Error handling message ${message.id}: ${formatError(error)}`);
     } finally {
       this.processingMessages.delete(key);
+      this.giveawayTextCache.delete(message.id);
     }
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist Matching
+  // OPTIMIZED Watchlist Matching
   // -------------------------------------------------------------------------
   private async checkWatchlistMatches(message: Message, prize: string): Promise<void> {
     if (!this.botManager) return;
 
     try {
-      const text = this.getGiveawayText(message).toLowerCase();
-      const allWatchlists = await getAllWatchlists();
-      
-      if (allWatchlists.length === 0) return;
+      const watchlistData = await this.getCachedWatchlists();
+      if (watchlistData.size === 0) return;
 
+      const text = this.getCachedGiveawayText(message);
+      const lowerText = text.toLowerCase();
+
+      // Early exit - check if ANY item matches
+      const allItems = Array.from(watchlistData.values()).flat();
+      const hasAnyMatch = allItems.some(item => lowerText.includes(item.toLowerCase()));
+      if (!hasAnyMatch) return;
+
+      // Find matching users
       const matchedUsers: string[] = [];
 
-      for (const watchlist of allWatchlists) {
-        for (const item of watchlist.items) {
-          if (text.includes(item)) {
-            matchedUsers.push(watchlist.userId);
+      for (const [userId, items] of watchlistData) {
+        for (const item of items) {
+          if (lowerText.includes(item.toLowerCase())) {
+            matchedUsers.push(userId);
             break;
           }
         }
@@ -298,19 +314,135 @@ export class GiveawayManager extends EventEmitter {
       const messageUrl = `https://discord.com/channels/${message.guild!.id}/${message.channel.id}/${message.id}`;
       const endsAt = this.extractEndTimestamp(message);
 
-      for (const userId of uniqueUsers) {
-        await this.botManager.sendWatchlistDM(
-          userId,
-          prize,
-          message.guild!.name,
-          (message.channel as any).name || 'unknown',
-          endsAt,
-          messageUrl
-        );
-      }
+      // SEND DMS WITH OPTIMAL BATCHING
+      await this.sendWatchlistDMs(uniqueUsers, prize, message, endsAt, messageUrl);
+
     } catch (err) {
       this.log.error('Watchlist check error', { error: formatError(err) });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // OPTIMIZED DM Sending with Smart Batching
+  // -------------------------------------------------------------------------
+  private async sendWatchlistDMs(
+    users: string[],
+    prize: string,
+    message: Message,
+    endsAt: number | null,
+    messageUrl: string
+  ): Promise<void> {
+    if (users.length === 0) return;
+
+    // Dynamic batch size based on user count
+    // More users = larger batches (but still safe)
+    let batchSize: number;
+    let delayBetweenBatches: number;
+
+    if (users.length <= 10) {
+      batchSize = 5;
+      delayBetweenBatches = 200;
+    } else if (users.length <= 50) {
+      batchSize = 10;
+      delayBetweenBatches = 500;
+    } else if (users.length <= 200) {
+      batchSize = 15;
+      delayBetweenBatches = 800;
+    } else {
+      batchSize = 20;
+      delayBetweenBatches = 1000;
+    }
+
+    this.log.debug(`Sending ${users.length} DMs in batches of ${batchSize}`);
+
+    let sent = 0;
+    let failed = 0;
+
+    for (let i = 0; i < users.length; i += batchSize) {
+      const batch = users.slice(i, i + batchSize);
+      
+      try {
+        const results = await Promise.allSettled(
+          batch.map(userId => 
+            this.botManager!.sendWatchlistDM(
+              userId,
+              prize,
+              message.guild!.name,
+              (message.channel as any).name || 'unknown',
+              endsAt,
+              messageUrl
+            )
+          )
+        );
+
+        // Count successes and failures
+        for (const result of results) {
+          if (result.status === 'fulfilled') sent++;
+          else failed++;
+        }
+
+        // Log progress for large batches
+        if (users.length > 50 && (i + batchSize) % 50 === 0) {
+          this.log.debug(`Watchlist DMs: ${Math.min(i + batchSize, users.length)}/${users.length} sent`);
+        }
+
+      } catch (err) {
+        this.log.warn(`Batch failed for users ${i}-${i + batchSize}`, { error: formatError(err) });
+        failed += batch.length;
+      }
+
+      // Delay between batches (except for the last one)
+      if (i + batchSize < users.length) {
+        // Add jitter to avoid rate limit patterns
+        const jitter = Math.random() * 200;
+        await delay(delayBetweenBatches + jitter);
+      }
+    }
+
+    this.log.debug(`Watchlist DMs complete: ${sent} sent, ${failed} failed`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Cached watchlist data
+  // -------------------------------------------------------------------------
+  private async getCachedWatchlists(): Promise<Map<string, string[]>> {
+    const now = Date.now();
+    
+    if (this.watchlistCache.size > 0 && now < this.watchlistCacheExpiry) {
+      return this.watchlistCache;
+    }
+
+    try {
+      const watchlists = await getAllWatchlists();
+      this.watchlistCache = new Map();
+      
+      for (const wl of watchlists) {
+        if (wl.items && wl.items.length > 0) {
+          this.watchlistCache.set(wl.userId, wl.items);
+        }
+      }
+      
+      this.watchlistCacheExpiry = now + this.WATCHLIST_CACHE_TTL;
+      this.log.debug(`Watchlist cache refreshed: ${this.watchlistCache.size} users`);
+    } catch (err) {
+      this.log.error('Failed to refresh watchlist cache', { error: formatError(err) });
+    }
+
+    return this.watchlistCache;
+  }
+
+  // -------------------------------------------------------------------------
+  // Cached giveaway text
+  // -------------------------------------------------------------------------
+  private getCachedGiveawayText(message: Message): string {
+    const key = message.id;
+    if (this.giveawayTextCache.has(key)) {
+      return this.giveawayTextCache.get(key)!;
+    }
+
+    const text = this.getGiveawayText(message);
+    this.giveawayTextCache.set(key, text);
+    return text;
   }
 
   private getGiveawayText(message: Message): string {
@@ -329,6 +461,10 @@ export class GiveawayManager extends EventEmitter {
     }
     
     return parts.join(' ');
+  }
+
+  private escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   // -------------------------------------------------------------------------
