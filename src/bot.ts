@@ -189,11 +189,15 @@ class NotificationService {
     if (!channel) throw new Error('Tracker channel not found');
 
     const data = job.data;
+    
+    // Try to get guild from cache, but use passed data as fallback
     const guild = this.bot.guilds.cache.get(data.guildId);
     const guildName = guild?.name || data.guildName || 'Unknown';
-    const guildIcon = guild?.iconURL({ size: 512 }) || null;
-    const guildBanner = guild?.bannerURL({ size: 1024 }) || null;
-    const memberCount = guild?.memberCount ?? null;
+    
+    // ✅ Use passed data for banner and thumbnail - this is the key fix for the MAIN SERVER MESSAGE
+    const guildIcon = (data as any).guildIcon || guild?.iconURL({ size: 512 }) || null;
+    const guildBanner = (data as any).guildBanner || guild?.bannerURL({ size: 1024 }) || null;
+    const memberCount = (data as any).memberCount || guild?.memberCount ?? null;
     
     // Get invite - try cached, then passed, then generate
     let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite available';
@@ -253,7 +257,7 @@ class NotificationService {
       memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
 
-    // Build the embed for the MAIN SERVER MESSAGE with thumbnail and banner
+    // Build the embed with proper order for the MAIN SERVER MESSAGE
     const embed = new EmbedBuilder()
       .setAuthor({ 
         name: 'New Giveaway', 
