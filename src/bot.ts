@@ -199,38 +199,38 @@ class NotificationService {
       : '@everyone';
 
     const description = [
-      `### 🎁 Details`,
-      `**🏠 Server:** ${guildName}`,
-      `**💬 Channel:** #${data.channelName}`,
-      `**👑 Winners:** ${winnerCount}`,
+      `### Details`,
+      `**Server:** ${guildName}`,
+      `**Channel:** #${data.channelName}`,
+      `**Winners:** ${winnerCount}`,
       ``,
-      `### ⏰ Time`,
-      `**📅 Ends:** <t:${endTimestamp}:F>`,
-      `**⏳ Countdown:** <t:${endTimestamp}:R>`,
+      `### Time`,
+      `**Ends:** <t:${endTimestamp}:F>`,
+      `**Countdown:** <t:${endTimestamp}:R>`,
       ``,
-      `### 🔗 Links`,
-      `**📨 Invite:** ${inviteUrl}`,
-      memberCount ? `**👥 Members:** ${memberCount.toLocaleString()}` : '',
+      `### Links`,
+      `**Invite:** ${inviteUrl}`,
+      memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
 
     const embed = new EmbedBuilder()
-      .setAuthor({ name: '🎁 New Giveaway', iconURL: this.bot.user?.displayAvatarURL() })
+      .setAuthor({ name: 'New Giveaway', iconURL: this.bot.user?.displayAvatarURL() })
       .setTitle(data.prize || 'Unknown Prize')
       .setDescription(description)
       .setColor(0x5865F2)
       .setThumbnail(guildIcon)
-      .setFooter({ text: `⚡ Detected in ${detectionTime}ms`, iconURL: this.bot.user?.displayAvatarURL() })
+      .setFooter({ text: `Detected in ${detectionTime}ms`, iconURL: this.bot.user?.displayAvatarURL() })
       .setTimestamp(data.detectedAt);
     if (guildBanner) embed.setImage(guildBanner);
 
     const messageUrl = `https://discord.com/channels/${data.guildId}/${data.channelId}/${data.messageId}`;
     const row = new ActionRowBuilder<ButtonBuilder>();
     if (inviteUrl.startsWith('http')) {
-      row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(inviteUrl).setEmoji('🚀'));
+      row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(inviteUrl));
     }
     row.addComponents(
-      new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl).setEmoji('💬'),
-      new ButtonBuilder().setLabel('Jump').setStyle(ButtonStyle.Link).setURL(messageUrl).setEmoji('🎯'),
+      new ButtonBuilder().setLabel('Message').setStyle(ButtonStyle.Link).setURL(messageUrl),
+      new ButtonBuilder().setLabel('Jump').setStyle(ButtonStyle.Link).setURL(messageUrl),
     );
 
     const start = Date.now();
@@ -275,7 +275,7 @@ function isAdmin(userId: string): boolean {
 
 async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>): Promise<boolean> {
   if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: '⛔ No permission.', ephemeral: true });
+    await interaction.reply({ content: 'No permission.', ephemeral: true });
     return false;
   }
   return true;
@@ -359,7 +359,7 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
-  
+
   public async start(): Promise<void> {
     const LOGIN_TIMEOUT_MS = 10000;
 
@@ -418,7 +418,8 @@ export class BotManager {
     messageUrl: string,
     guildId?: string,
     guildIcon?: string | null,
-    detectedAt?: number
+    detectedAt?: number,
+    inviteUrl?: string | null
   ): Promise<boolean> {
     try {
       let user;
@@ -444,29 +445,31 @@ export class BotManager {
       const endTimestamp = endsAt ? Math.floor(endsAt / 1000) : null;
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
+      const resolvedInvite = inviteUrl || 'No invite';
 
       const description = [
-        `### 🎁 Details`,
-        `**🏠 Server:** ${guildName}`,
-        `**💬 Channel:** #${channelName}`,
-        `**👑 Winners:** ${winnerCount}`,
+        `### Details`,
+        `**Server:** ${guildName}`,
+        `**Channel:** #${channelName}`,
+        `**Winners:** ${winnerCount}`,
         ``,
-        `### ⏰ Time`,
-        endTimestamp ? `**📅 Ends:** <t:${endTimestamp}:F>` : '',
-        endTimestamp ? `**⏳ Countdown:** <t:${endTimestamp}:R>` : '',
+        `### Time`,
+        endTimestamp ? `**Ends:** <t:${endTimestamp}:F>` : '',
+        endTimestamp ? `**Countdown:** <t:${endTimestamp}:R>` : '',
         ``,
-        `### 🔗 Links`,
+        `### Links`,
+        `**Invite:** ${resolvedInvite}`,
         `[Jump to giveaway](${messageUrl})`,
       ].filter(Boolean).join('\n');
 
       const embed = new EmbedBuilder()
-        .setAuthor({ name: '🎁 New Giveaway', iconURL: this.client.user?.displayAvatarURL() })
+        .setAuthor({ name: 'New Giveaway', iconURL: this.client.user?.displayAvatarURL() })
         .setTitle(prize || 'Unknown Prize')
         .setDescription(description)
         .setColor(0x5865F2)
-        .setFooter({ 
-          text: `⚡ Match from your watchlist${detectionTime ? ` • Detected in ${detectionTime}ms` : ''}`, 
-          iconURL: this.client.user?.displayAvatarURL() 
+        .setFooter({
+          text: `Match from your watchlist${detectionTime ? ` - Detected in ${detectionTime}ms` : ''}`,
+          iconURL: this.client.user?.displayAvatarURL()
         })
         .setTimestamp();
 
@@ -474,17 +477,24 @@ export class BotManager {
         embed.setThumbnail(guildIcon);
       }
 
-      const row = new ActionRowBuilder<ButtonBuilder>()
-        .addComponents(
+      const row = new ActionRowBuilder<ButtonBuilder>();
+      if (resolvedInvite.startsWith('http')) {
+        row.addComponents(
           new ButtonBuilder()
-            .setLabel('View Giveaway')
+            .setLabel('Join Server')
             .setStyle(ButtonStyle.Link)
-            .setURL(messageUrl)
-            .setEmoji('🎯')
+            .setURL(resolvedInvite)
         );
+      }
+      row.addComponents(
+        new ButtonBuilder()
+          .setLabel('View Giveaway')
+          .setStyle(ButtonStyle.Link)
+          .setURL(messageUrl)
+      );
 
-      await dmChannel.send({ 
-        embeds: [embed], 
+      await dmChannel.send({
+        embeds: [embed],
         components: [row]
       });
 
@@ -533,13 +543,13 @@ export class BotManager {
       if (!dmChannel) return false;
 
       const embed = new EmbedBuilder()
-        .setAuthor({ name: '🔴 Giveaway Ended', iconURL: this.client.user?.displayAvatarURL() })
-        .setTitle(`🔴 ${prize || 'Giveaway Ended'}`)
+        .setAuthor({ name: 'Giveaway Ended', iconURL: this.client.user?.displayAvatarURL() })
+        .setTitle(`${prize || 'Giveaway Ended'}`)
         .setDescription([
-          `**🏠 Server:** ${guildName}`,
-          `**💬 Channel:** #${channelName}`,
+          `**Server:** ${guildName}`,
+          `**Channel:** #${channelName}`,
           '',
-          `This giveaway has ended. Better luck next time! 🍀`,
+          `This giveaway has ended. Better luck next time.`,
           '',
           `[View giveaway](${messageUrl})`
         ].join('\n'))
@@ -557,7 +567,6 @@ export class BotManager {
             .setLabel('View Giveaway')
             .setStyle(ButtonStyle.Link)
             .setURL(messageUrl)
-            .setEmoji('🔴')
         );
 
       await dmChannel.send({ embeds: [embed], components: [row] });
@@ -573,7 +582,7 @@ export class BotManager {
 
   private async watchlistCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     const sub = interaction.options.getSubcommand();
-    
+
     if (sub === 'add') await this.watchAdd(interaction);
     else if (sub === 'remove') await this.watchRemove(interaction);
     else if (sub === 'list') await this.watchList(interaction);
@@ -582,17 +591,17 @@ export class BotManager {
 
   private async watchAdd(interaction: ChatInputCommandInteraction<CacheType>) {
     const item = interaction.options.getString('item', true).trim().toLowerCase();
-    
+
     if (item.length < 2 || item.length > 50) {
-      await interaction.reply({ content: '❌ Item must be 2-50 characters.', ephemeral: true });
+      await interaction.reply({ content: 'Item must be 2-50 characters.', ephemeral: true });
       return;
     }
-    
+
     await addItem(interaction.user.id, item);
     const items = await getItems(interaction.user.id);
-    
+
     await interaction.reply({
-      content: `✅ Watching **${item}**\n\nYour items:\n${items.map(i => `• ${i}`).join('\n')}`,
+      content: `Watching **${item}**\n\nYour items:\n${items.map(i => `- ${i}`).join('\n')}`,
       ephemeral: true
     });
   }
@@ -600,47 +609,47 @@ export class BotManager {
   private async watchRemove(interaction: ChatInputCommandInteraction<CacheType>) {
     const item = interaction.options.getString('item', true).trim().toLowerCase();
     const removed = await removeItem(interaction.user.id, item);
-    
+
     if (!removed) {
-      await interaction.reply({ content: `❌ "${item}" not in your watchlist.`, ephemeral: true });
+      await interaction.reply({ content: `"${item}" not in your watchlist.`, ephemeral: true });
       return;
     }
-    
+
     const items = await getItems(interaction.user.id);
     await interaction.reply({
-      content: `🗑️ Removed **${item}**\n\nYour items:\n${items.map(i => `• ${i}`).join('\n')}`,
+      content: `Removed **${item}**\n\nYour items:\n${items.map(i => `- ${i}`).join('\n')}`,
       ephemeral: true
     });
   }
 
   private async watchList(interaction: ChatInputCommandInteraction<CacheType>) {
     const items = await getItems(interaction.user.id);
-    
+
     if (items.length === 0) {
       await interaction.reply({
-        content: '📭 No items. Use `/watch add <item>` to start tracking giveaways.',
+        content: 'No items. Use `/watch add <item>` to start tracking giveaways.',
         ephemeral: true
       });
       return;
     }
-    
+
     await interaction.reply({
-      content: `**Your items (${items.length})**\n${items.map(i => `• ${i}`).join('\n')}`,
+      content: `**Your items (${items.length})**\n${items.map(i => `- ${i}`).join('\n')}`,
       ephemeral: true
     });
   }
 
   private async watchClear(interaction: ChatInputCommandInteraction<CacheType>) {
     const items = await getItems(interaction.user.id);
-    
+
     if (items.length === 0) {
-      await interaction.reply({ content: '📭 Watchlist is empty.', ephemeral: true });
+      await interaction.reply({ content: 'Watchlist is empty.', ephemeral: true });
       return;
     }
-    
+
     await clearItems(interaction.user.id);
     await interaction.reply({
-      content: `✅ Cleared ${items.length} items.`,
+      content: `Cleared ${items.length} items.`,
       ephemeral: true
     });
   }
@@ -654,12 +663,12 @@ export class BotManager {
     const totalEver = await getTotalDetected();
     const embed = new EmbedBuilder()
       .setColor(0x00AAFF)
-      .setTitle('📊 Tracker Stats')
+      .setTitle('Tracker Stats')
       .addFields(
-        { name: '📦 Total Ever Tracked', value: String(totalEver), inline: true },
-        { name: '🟢 Active Now', value: String(stats.activeGiveaways), inline: true },
-        { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
-        { name: '⏱️ Last Detection', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
+        { name: 'Total Ever Tracked', value: String(totalEver), inline: true },
+        { name: 'Active Now', value: String(stats.activeGiveaways), inline: true },
+        { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
+        { name: 'Last Detection', value: stats.lastDetected ? formatTimestamp(stats.lastDetected) : 'Never', inline: false },
       )
       .setTimestamp();
     await interaction.editReply({ embeds: [embed] });
@@ -669,18 +678,18 @@ export class BotManager {
     await deferReply(interaction, false);
     const active = await getActiveGiveaways(10);
     if (active.length === 0) {
-      await interaction.editReply({ content: '🔍 Nothing active right now.' });
+      await interaction.editReply({ content: 'Nothing active right now.' });
       return;
     }
     const embed = new EmbedBuilder()
       .setColor(0xFFD700)
-      .setTitle(`🎯 ${active.length} Active`)
+      .setTitle(`${active.length} Active`)
       .setTimestamp();
     for (const g of active.slice(0, 10)) {
       const ends = g.endsAt ? `<t:${Math.floor(g.endsAt / 1000)}:R>` : 'Unknown';
       embed.addFields({
-        name: `🏆 ${truncate(g.prize, 50)}`,
-        value: `🏠 ${g.guildName} — 💬 #${g.channelName}\n⏳ Ends: ${ends}`,
+        name: `${truncate(g.prize, 50)}`,
+        value: `${g.guildName} - #${g.channelName}\nEnds: ${ends}`,
         inline: false,
       });
     }
@@ -691,17 +700,17 @@ export class BotManager {
     await deferReply(interaction, false);
     const recent = await getAllGiveaways(10);
     if (recent.length === 0) {
-      await interaction.editReply({ content: '📭 Nothing yet.' });
+      await interaction.editReply({ content: 'Nothing yet.' });
       return;
     }
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
-      .setTitle('📋 Recent')
+      .setTitle('Recent')
       .setTimestamp();
     for (const g of recent) {
       embed.addFields({
-        name: `${g.status === 'active' ? '🟢' : '🔴'} ${truncate(g.prize, 40)}`,
-        value: `🏠 ${g.guildName}\n${formatTimestamp(g.detectedAt)}`,
+        name: `${g.status === 'active' ? '[Active]' : '[Ended]'} ${truncate(g.prize, 40)}`,
+        value: `${g.guildName}\n${formatTimestamp(g.detectedAt)}`,
         inline: false,
       });
     }
@@ -712,18 +721,18 @@ export class BotManager {
     if (!await requireAdmin(interaction)) return;
     const channel = interaction.options.getChannel('channel', true);
     if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
-      await interaction.reply({ content: '❌ Pick a text channel.', ephemeral: true });
+      await interaction.reply({ content: 'Pick a text channel.', ephemeral: true });
       return;
     }
     (CONFIG as any).trackerChannelId = channel.id;
-    await interaction.reply({ content: `✅ Set to ${channel}`, ephemeral: true });
+    await interaction.reply({ content: `Set to ${channel}`, ephemeral: true });
   }
 
   private async resetCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     if (!await requireAdmin(interaction)) return;
     await deferReply(interaction, true);
     await resetDatabase();
-    await interaction.editReply({ content: '🗑️ Wiped.' });
+    await interaction.editReply({ content: 'Wiped.' });
   }
 
   private async statusCommand(interaction: ChatInputCommandInteraction<CacheType>) {
@@ -733,12 +742,12 @@ export class BotManager {
     const totalEver = await getTotalDetected();
     const embed = new EmbedBuilder()
       .setColor(0x00FF00)
-      .setTitle('🟢 Running')
+      .setTitle('Running')
       .addFields(
-        { name: '📦 Total Ever', value: String(totalEver), inline: true },
-        { name: '🟢 Active', value: String(stats.activeGiveaways), inline: true },
-        { name: '🌐 Servers', value: String(stats.serversWithGiveaways), inline: true },
-        { name: '📨 Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
+        { name: 'Total Ever', value: String(totalEver), inline: true },
+        { name: 'Active', value: String(stats.activeGiveaways), inline: true },
+        { name: 'Servers', value: String(stats.serversWithGiveaways), inline: true },
+        { name: 'Channel', value: `<#${CONFIG.trackerChannelId}>`, inline: false },
       )
       .setTimestamp();
     await interaction.editReply({ embeds: [embed] });
@@ -750,13 +759,13 @@ export class BotManager {
     const m = this.metrics.getSnapshot();
     const embed = new EmbedBuilder()
       .setColor(0x3498DB)
-      .setTitle('📈 Performance Metrics')
+      .setTitle('Performance Metrics')
       .addFields(
         { name: 'Giveaways Detected', value: String(m.giveawaysDetected), inline: true },
         { name: 'Notifications Sent', value: String(m.notificationsSent), inline: true },
         { name: 'Failed Notifications', value: String(m.notificationsFailed), inline: true },
         { name: 'Retry Attempts', value: String(m.retryAttempts), inline: true },
-        { name: 'Avg Detection→Notify', value: `${m.avgDetectionLatency}ms`, inline: true },
+        { name: 'Avg Detection to Notify', value: `${m.avgDetectionLatency}ms`, inline: true },
         { name: 'Avg Discord Latency', value: `${m.avgDiscordLatency}ms`, inline: true },
       )
       .setTimestamp();
@@ -767,20 +776,20 @@ export class BotManager {
     await deferReply(interaction, false);
     const embed = new EmbedBuilder()
       .setColor(0x9B59B6)
-      .setTitle('📚 Commands')
+      .setTitle('Commands')
       .addFields(
-        { name: '📊 /stats', value: 'Detection stats', inline: false },
-        { name: '🎯 /active', value: 'Active giveaways', inline: false },
-        { name: '📋 /recent', value: 'Recent giveaways', inline: false },
-        { name: '🟢 /status', value: 'System status (admin)', inline: false },
-        { name: '📈 /metrics', value: 'Performance metrics (admin)', inline: false },
-        { name: '⚙️ /setchannel', value: 'Set notify channel (admin)', inline: false },
-        { name: '🗑️ /reset', value: 'Clear database (admin)', inline: false },
-        { name: '🔔 /panel', value: 'Resend role panel (admin)', inline: false },
-        { name: '👀 /watch add <item>', value: 'Track giveaway items', inline: false },
-        { name: '👀 /watch remove <item>', value: 'Stop tracking item', inline: false },
-        { name: '👀 /watch list', value: 'Show tracked items', inline: false },
-        { name: '👀 /watch clear', value: 'Clear all items', inline: false },
+        { name: '/stats', value: 'Detection stats', inline: false },
+        { name: '/active', value: 'Active giveaways', inline: false },
+        { name: '/recent', value: 'Recent giveaways', inline: false },
+        { name: '/status', value: 'System status (admin)', inline: false },
+        { name: '/metrics', value: 'Performance metrics (admin)', inline: false },
+        { name: '/setchannel', value: 'Set notify channel (admin)', inline: false },
+        { name: '/reset', value: 'Clear database (admin)', inline: false },
+        { name: '/panel', value: 'Resend role panel (admin)', inline: false },
+        { name: '/watch add <item>', value: 'Track giveaway items', inline: false },
+        { name: '/watch remove <item>', value: 'Stop tracking item', inline: false },
+        { name: '/watch list', value: 'Show tracked items', inline: false },
+        { name: '/watch clear', value: 'Clear all items', inline: false },
       )
       .setFooter({ text: 'made by gab' })
       .setTimestamp();
@@ -791,7 +800,7 @@ export class BotManager {
     if (!await requireAdmin(interaction)) return;
     await deferReply(interaction, true);
     await this.sendRolePanel();
-    await interaction.editReply({ content: '✅ Panel sent.' });
+    await interaction.editReply({ content: 'Panel sent.' });
   }
 
   private async purgeCommand(interaction: ChatInputCommandInteraction<CacheType>) {
@@ -805,13 +814,13 @@ export class BotManager {
       const botMessages = messages.filter(m => m.author.id === this.client.user?.id);
       const toDelete = botMessages.first(amount);
       if (toDelete.length === 0) {
-        await interaction.editReply({ content: '📭 Nothing to delete.' });
+        await interaction.editReply({ content: 'Nothing to delete.' });
         return;
       }
       await channel.bulkDelete(toDelete, true);
-      await interaction.editReply({ content: `🗑️ Deleted ${toDelete.length}.` });
+      await interaction.editReply({ content: `Deleted ${toDelete.length}.` });
     } catch {
-      await interaction.editReply({ content: '❌ Failed.' });
+      await interaction.editReply({ content: 'Failed.' });
     }
   }
 
@@ -827,47 +836,47 @@ export class BotManager {
       const oldPanel = messages.find(m =>
         m.author.id === this.client.user?.id &&
         m.embeds.length > 0 &&
-        m.embeds[0]?.title === '🔔 Giveaway Notifications'
+        m.embeds[0]?.title === 'Giveaway Notifications'
       );
       if (oldPanel) await oldPanel.delete().catch(() => {});
     } catch {}
     const embed = new EmbedBuilder()
       .setColor(0xF1C40F)
-      .setTitle('🔔 Giveaway Notifications')
+      .setTitle('Giveaway Notifications')
       .setDescription('Click the button to toggle giveaway pings.\nYou\'ll get mentioned whenever a new giveaway is detected.')
       .setFooter({ text: 'Toggle anytime' });
     const row = new ActionRowBuilder<ButtonBuilder>()
-      .addComponents(new ButtonBuilder().setCustomId('toggle_ping').setLabel('Toggle Pings').setStyle(ButtonStyle.Primary).setEmoji('🔔'));
+      .addComponents(new ButtonBuilder().setCustomId('toggle_ping').setLabel('Toggle Pings').setStyle(ButtonStyle.Primary));
     await channel.send({ embeds: [embed], components: [row] });
   }
 
   private async handlePingToggle(interaction: ButtonInteraction): Promise<void> {
     const pingRoleId = process.env.PING_ROLE_ID;
     if (!pingRoleId) {
-      await interaction.reply({ content: '❌ Ping role not configured.', ephemeral: true });
+      await interaction.reply({ content: 'Ping role not configured.', ephemeral: true });
       return;
     }
     const role = interaction.guild?.roles.cache.get(pingRoleId);
     if (!role) {
-      await interaction.reply({ content: '❌ Role not found.', ephemeral: true });
+      await interaction.reply({ content: 'Role not found.', ephemeral: true });
       return;
     }
     const member = interaction.member;
     if (!member || !('roles' in member)) {
-      await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+      await interaction.reply({ content: 'Something went wrong.', ephemeral: true });
       return;
     }
     const hasRole = (member.roles as any).cache?.has(role.id) ?? false;
     try {
       if (hasRole) {
         await (member.roles as any).remove(role);
-        await interaction.reply({ content: '🔕 Removed the role.', ephemeral: true });
+        await interaction.reply({ content: 'Removed the role.', ephemeral: true });
       } else {
         await (member.roles as any).add(role);
-        await interaction.reply({ content: '🔔 Added the role.', ephemeral: true });
+        await interaction.reply({ content: 'Added the role.', ephemeral: true });
       }
     } catch {
-      await interaction.reply({ content: '❌ Failed.', ephemeral: true });
+      await interaction.reply({ content: 'Failed.', ephemeral: true });
     }
   }
 
@@ -889,7 +898,7 @@ export class BotManager {
     const removed = await purgeEndedGiveaways();
     if (removed.length > 0) {
       const trackerChannel = this.client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
-      
+
       for (const giveaway of removed) {
         // Update the main notification embed
         const notifMsgId = giveaway.notificationMessageId;
@@ -898,7 +907,7 @@ export class BotManager {
           if (msg && msg.embeds.length > 0) {
             const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
               .setColor(0xFF0000)
-              .setAuthor({ name: '🔴 Giveaway Ended', iconURL: msg.embeds[0].author?.iconURL || undefined });
+              .setAuthor({ name: 'Giveaway Ended', iconURL: msg.embeds[0].author?.iconURL || undefined });
             await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
           }
         }
@@ -937,10 +946,10 @@ export class BotManager {
       new SlashCommandBuilder()
         .setName('watch')
         .setDescription('Manage giveaway watchlist')
-        .addSubcommand(sub => 
+        .addSubcommand(sub =>
           sub.setName('add')
             .setDescription('Add an item to watch')
-            .addStringOption(opt => 
+            .addStringOption(opt =>
               opt.setName('item')
                 .setDescription('Item to track (e.g., "VFA", "VSL")')
                 .setRequired(true)
@@ -948,20 +957,20 @@ export class BotManager {
                 .setMaxLength(50)
             )
         )
-        .addSubcommand(sub => 
+        .addSubcommand(sub =>
           sub.setName('remove')
             .setDescription('Remove an item from watchlist')
-            .addStringOption(opt => 
+            .addStringOption(opt =>
               opt.setName('item')
                 .setDescription('Item to remove')
                 .setRequired(true)
             )
         )
-        .addSubcommand(sub => 
+        .addSubcommand(sub =>
           sub.setName('list')
             .setDescription('Show your tracked items')
         )
-        .addSubcommand(sub => 
+        .addSubcommand(sub =>
           sub.setName('clear')
             .setDescription('Clear all tracked items')
         ),
