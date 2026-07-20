@@ -253,15 +253,32 @@ class NotificationService {
       memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
 
+    // Build the embed with thumbnail and banner
     const embed = new EmbedBuilder()
-      .setAuthor({ name: 'New Giveaway', iconURL: this.bot.user?.displayAvatarURL() })
+      .setAuthor({ 
+        name: 'New Giveaway', 
+        iconURL: this.bot.user?.displayAvatarURL() 
+      })
       .setTitle(data.prize || 'Unknown Prize')
       .setDescription(description)
       .setColor(0x5865F2)
-      .setThumbnail(guildIcon)
-      .setFooter({ text: `Detected in ${detectionTime}ms`, iconURL: this.bot.user?.displayAvatarURL() })
       .setTimestamp(data.detectedAt);
-    if (guildBanner) embed.setImage(guildBanner);
+
+    // Set thumbnail (server icon) if available
+    if (guildIcon) {
+      embed.setThumbnail(guildIcon);
+    }
+
+    // Set banner (server banner) if available - displays as large image at bottom
+    if (guildBanner) {
+      embed.setImage(guildBanner);
+    }
+
+    // Set footer with detection time
+    embed.setFooter({ 
+      text: `Detected in ${detectionTime}ms`, 
+      iconURL: this.bot.user?.displayAvatarURL() 
+    });
 
     const messageUrl = `https://discord.com/channels/${data.guildId}/${data.channelId}/${data.messageId}`;
     const row = new ActionRowBuilder<ButtonBuilder>();
@@ -560,14 +577,30 @@ export class BotManager {
       ].filter(Boolean).join('\n');
 
       const embed = new EmbedBuilder()
-        .setAuthor({ name: 'New Giveaway', iconURL: this.client.user?.displayAvatarURL() })
+        .setAuthor({ 
+          name: 'New Giveaway', 
+          iconURL: this.client.user?.displayAvatarURL() 
+        })
         .setTitle(prize || 'Unknown Prize')
         .setDescription(description)
         .setColor(0x5865F2)
-        .setThumbnail(guildIcon || null)
-        .setFooter({ text: `Detected in ${detectionTime}ms`, iconURL: this.client.user?.displayAvatarURL() })
         .setTimestamp(detectedAt);
-      if (guildBanner) embed.setImage(guildBanner);
+
+      // Set thumbnail if available
+      if (guildIcon) {
+        embed.setThumbnail(guildIcon);
+      }
+
+      // Set banner if available
+      if (guildBanner) {
+        embed.setImage(guildBanner);
+      }
+
+      // Set footer
+      embed.setFooter({ 
+        text: `Detected in ${detectionTime}ms`, 
+        iconURL: this.client.user?.displayAvatarURL() 
+      });
 
       const row = new ActionRowBuilder<ButtonBuilder>();
       if (resolvedInvite.startsWith('http')) {
@@ -628,7 +661,10 @@ export class BotManager {
       if (!dmChannel) return false;
 
       const embed = new EmbedBuilder()
-        .setAuthor({ name: 'Giveaway Ended', iconURL: this.client.user?.displayAvatarURL() })
+        .setAuthor({ 
+          name: 'Giveaway Ended', 
+          iconURL: this.client.user?.displayAvatarURL() 
+        })
         .setTitle(`${prize || 'Giveaway Ended'}`)
         .setDescription([
           `**Server:** ${guildName}`,
@@ -639,7 +675,10 @@ export class BotManager {
           `[View giveaway](${messageUrl})`
         ].join('\n'))
         .setColor(0xFF0000)
-        .setFooter({ text: 'Giveaway tracker', iconURL: this.client.user?.displayAvatarURL() })
+        .setFooter({ 
+          text: 'Giveaway tracker', 
+          iconURL: this.client.user?.displayAvatarURL() 
+        })
         .setTimestamp();
 
       if (guildIcon) {
@@ -996,7 +1035,10 @@ export class BotManager {
           if (msg && msg.embeds.length > 0) {
             const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
               .setColor(0xFF0000)
-              .setAuthor({ name: 'Giveaway Ended', iconURL: msg.embeds[0].author?.iconURL || undefined });
+              .setAuthor({ 
+                name: 'Giveaway Ended', 
+                iconURL: msg.embeds[0].author?.iconURL || undefined 
+              });
             await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
           }
         }
