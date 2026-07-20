@@ -942,7 +942,7 @@ export class BotManager {
             .setDescription('Add an item to watch')
             .addStringOption(opt => 
               opt.setName('item')
-                .setDescription('Item to track (e.g., "nitro", "steam")')
+                .setDescription('Item to track (e.g., "VFA", "VSL")')
                 .setRequired(true)
                 .setMinLength(2)
                 .setMaxLength(50)
