@@ -359,6 +359,46 @@ export class BotManager {
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
+  
+  public async start(): Promise<void> {
+    const LOGIN_TIMEOUT_MS = 10000;
+
+    logger.info('BotManager: attempting login...', { component: 'BotManager' });
+
+    try {
+      await Promise.race([
+        this.client.login(this.botToken),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Login timed out after 10s')), LOGIN_TIMEOUT_MS)
+        ),
+      ]);
+
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          if (this.client.isReady()) {
+            resolve();
+          } else {
+            this.client.once('ready', () => resolve());
+          }
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Ready event timed out after 10s')), LOGIN_TIMEOUT_MS)
+        ),
+      ]);
+
+      logger.info('BotManager started successfully', { component: 'BotManager' });
+    } catch (err) {
+      logger.error(`BotManager start failed: ${formatError(err)}`, { component: 'BotManager' });
+      throw err;
+    }
+  }
+
+  public async destroy(): Promise<void> {
+    if (this.presenceInterval) clearInterval(this.presenceInterval);
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    await this.client.destroy();
+  }
+
   public async sendGiveawayNotification(data: GiveawayData & { inviteUrl?: string }): Promise<boolean> {
     this.notifications.enqueue(data, data.inviteUrl || '');
     this.metrics.recordDetection(Date.now() - data.detectedAt);
@@ -381,7 +421,6 @@ export class BotManager {
     detectedAt?: number
   ): Promise<boolean> {
     try {
-      // Fetch user
       let user;
       try {
         user = await this.client.users.fetch(userId);
@@ -393,7 +432,6 @@ export class BotManager {
         }
       }
 
-      // Create DM
       let dmChannel;
       try {
         dmChannel = await user.createDM();
@@ -403,7 +441,6 @@ export class BotManager {
 
       if (!dmChannel) return false;
 
-      // Build embed - SAME FORMAT AS MAIN NOTIFICATIONS
       const endTimestamp = endsAt ? Math.floor(endsAt / 1000) : null;
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
@@ -866,9 +903,9 @@ export class BotManager {
           }
         }
 
-        // Send ended notification to watchlist users who were tracking this giveaway
-        // TODO: Store which users were notified for each giveaway to send ended notifications
-        // For now, this is a placeholder - you'd need to track who got notified
+        // TODO: Send ended notifications to watchlist users who were tracking this giveaway
+        // This requires storing which users got notified for each giveaway
+        // For now, the database tracks the giveaway status and will show as ended
       }
       await this.updatePresence();
     }
