@@ -510,7 +510,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist DM - Same format as main notifications with invite generation
+  // Watchlist DM - Now matches the main server message format EXACTLY
   // -------------------------------------------------------------------------
   
   public async sendWatchlistDM(
@@ -549,7 +549,6 @@ export class BotManager {
       if (!dmChannel) return false;
 
       // Extract channel ID from message URL
-      // Format: https://discord.com/channels/{guildId}/{channelId}/{messageId}
       const urlParts = messageUrl.split('/');
       const channelId = urlParts[5] || '';
 
@@ -565,7 +564,7 @@ export class BotManager {
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
 
-      // Same description shape/order as sendOne
+      // ✅ SAME description as the main server message
       const description = [
         `### Details`,
         `**Server:** ${guildName}`,
@@ -581,6 +580,7 @@ export class BotManager {
         memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
       ].filter(Boolean).join('\n');
 
+      // ✅ SAME embed structure as the main server message
       const embed = new EmbedBuilder()
         .setAuthor({ 
           name: 'New Giveaway', 
@@ -591,22 +591,23 @@ export class BotManager {
         .setColor(0x5865F2)
         .setTimestamp(detectedAt);
 
-      // Set thumbnail if available
+      // ✅ Set thumbnail if available (same as main)
       if (guildIcon) {
         embed.setThumbnail(guildIcon);
       }
 
-      // Set banner if available
+      // ✅ Set banner if available (same as main)
       if (guildBanner) {
         embed.setImage(guildBanner);
       }
 
-      // Set footer
+      // ✅ Same footer as main
       embed.setFooter({ 
         text: `Detected in ${detectionTime}ms`, 
         iconURL: this.client.user?.displayAvatarURL() 
       });
 
+      // ✅ Same buttons as main
       const row = new ActionRowBuilder<ButtonBuilder>();
       if (resolvedInvite.startsWith('http')) {
         row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(resolvedInvite));
@@ -1047,10 +1048,6 @@ export class BotManager {
             await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
           }
         }
-
-        // TODO: Send ended notifications to watchlist users who were tracking this giveaway
-        // This requires storing which users got notified for each giveaway
-        // For now, the database tracks the giveaway status and will show as ended
       }
       await this.updatePresence();
     }
