@@ -433,10 +433,13 @@ function rowToGiveaway(row: StoredGiveaway): GiveawayData {
 export async function addItem(userId: string, item: string): Promise<boolean> {
   await ensureConnected();
   
+  const trimmedItem = item.toLowerCase().trim();
+  if (!trimmedItem) return false;
+  
   const result = await watchlistCol.updateOne(
     { userId },
     { 
-      $addToSet: { items: item.toLowerCase().trim() },
+      $addToSet: { items: trimmedItem },
       $set: { updatedAt: Date.now() },
       $setOnInsert: { createdAt: Date.now() }
     },
@@ -449,9 +452,12 @@ export async function addItem(userId: string, item: string): Promise<boolean> {
 export async function removeItem(userId: string, item: string): Promise<boolean> {
   await ensureConnected();
   
+  const trimmedItem = item.toLowerCase().trim();
+  if (!trimmedItem) return false;
+  
   const result = await watchlistCol.updateOne(
     { userId },
-    { $pull: { items: item.toLowerCase().trim() } }
+    { $pull: { items: trimmedItem } }
   );
   
   return result.modifiedCount > 0;
@@ -467,17 +473,12 @@ export async function getItems(userId: string): Promise<string[]> {
 export async function getAllWatchlists(): Promise<UserWatchlist[]> {
   await ensureConnected();
   
-  return await watchlistCol.find({}).toArray();
-}
-
-export async function getUsersForItem(item: string): Promise<string[]> {
-  await ensureConnected();
-  
-  const docs = await watchlistCol.find({
-    items: item.toLowerCase().trim()
-  }).toArray();
-  
-  return docs.map(doc => doc.userId);
+  try {
+    return await watchlistCol.find({}).toArray();
+  } catch (err) {
+    logger.error('Failed to get watchlists', { error: String(err) });
+    return [];
+  }
 }
 
 export async function clearItems(userId: string): Promise<void> {
