@@ -33,6 +33,10 @@ export interface GiveawayData {
   inviteUrl?: string;
   notificationMessageId?: string;
   detectionTimeMs?: number;
+  // ✅ ADD THESE FIELDS FOR BANNER AND THUMBNAIL
+  guildIcon?: string | null;
+  guildBanner?: string | null;
+  memberCount?: number | null;
 }
 
 export interface GiveawayStats {
