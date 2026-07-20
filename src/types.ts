@@ -18,28 +18,20 @@ export interface AppConfig {
 
 export interface GiveawayData {
   id?: string;
-
   messageId: string;
   channelId: string;
-
   guildId: string;
   guildName: string;
   channelName: string;
-
   authorId: string;
   prize: string;
-
   detectedAt: number;
   endsAt: number | null;
-
   status: 'active' | 'ended';
-
   notifiedAt: number | null;
   lastSeenAt: number;
-
   inviteUrl?: string;
   notificationMessageId?: string;
-
   detectionTimeMs?: number;
 }
 
@@ -65,7 +57,6 @@ export interface DetectedGiveaway {
 
 export interface GiveawayMessage {
   content?: string;
-
   embeds?: {
     title?: string;
     description?: string;
@@ -77,11 +68,17 @@ export interface GiveawayMessage {
       value: string;
     }[];
   }[];
-
   buttons?: {
     customId?: string;
     label?: string;
     disabled?: boolean;
     style?: number;
   }[];
+}
+
+export interface UserWatchlist {
+  userId: string;
+  items: string[];
+  createdAt: number;
+  updatedAt: number;
 }
