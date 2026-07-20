@@ -366,33 +366,76 @@ export class BotManager {
     return true;
   }
 
+  // -------------------------------------------------------------------------
+  // Watchlist DM - Same format as main notifications
+  // -------------------------------------------------------------------------
   public async sendWatchlistDM(
     userId: string,
     prize: string,
     guildName: string,
     channelName: string,
     endsAt: number | null,
-    messageUrl: string
-  ): Promise<void> {
+    messageUrl: string,
+    guildId?: string,
+    guildIcon?: string | null,
+    detectedAt?: number
+  ): Promise<boolean> {
     try {
-      const user = await this.client.users.fetch(userId);
-      if (!user) return;
+      // Fetch user
+      let user;
+      try {
+        user = await this.client.users.fetch(userId);
+      } catch {
+        user = this.client.users.cache.get(userId);
+        if (!user) {
+          logger.debug(`User ${userId} not found`);
+          return false;
+        }
+      }
 
-      const dm = await user.createDM();
-      if (!dm) return;
+      // Create DM
+      let dmChannel;
+      try {
+        dmChannel = await user.createDM();
+      } catch {
+        return false;
+      }
+
+      if (!dmChannel) return false;
+
+      // Build embed - SAME FORMAT AS MAIN NOTIFICATIONS
+      const endTimestamp = endsAt ? Math.floor(endsAt / 1000) : null;
+      const winnerCount = extractWinnerCount(prize);
+      const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
+
+      const description = [
+        `### 🎁 Details`,
+        `**🏠 Server:** ${guildName}`,
+        `**💬 Channel:** #${channelName}`,
+        `**👑 Winners:** ${winnerCount}`,
+        ``,
+        `### ⏰ Time`,
+        endTimestamp ? `**📅 Ends:** <t:${endTimestamp}:F>` : '',
+        endTimestamp ? `**⏳ Countdown:** <t:${endTimestamp}:R>` : '',
+        ``,
+        `### 🔗 Links`,
+        `[Jump to giveaway](${messageUrl})`,
+      ].filter(Boolean).join('\n');
 
       const embed = new EmbedBuilder()
+        .setAuthor({ name: '🎁 New Giveaway', iconURL: this.client.user?.displayAvatarURL() })
+        .setTitle(prize || 'Unknown Prize')
+        .setDescription(description)
         .setColor(0x5865F2)
-        .setTitle(`🎁 ${prize}`)
-        .setDescription([
-          `**Server:** ${guildName}`,
-          `**Channel:** #${channelName}`,
-          endsAt ? `**Ends:** <t:${Math.floor(endsAt / 1000)}:R>` : '',
-          '',
-          `[Jump to giveaway](${messageUrl})`
-        ].filter(Boolean).join('\n'))
-        .setFooter({ text: 'Match from your watchlist' })
+        .setFooter({ 
+          text: `⚡ Match from your watchlist${detectionTime ? ` • Detected in ${detectionTime}ms` : ''}`, 
+          iconURL: this.client.user?.displayAvatarURL() 
+        })
         .setTimestamp();
+
+      if (guildIcon) {
+        embed.setThumbnail(guildIcon);
+      }
 
       const row = new ActionRowBuilder<ButtonBuilder>()
         .addComponents(
@@ -400,52 +443,91 @@ export class BotManager {
             .setLabel('View Giveaway')
             .setStyle(ButtonStyle.Link)
             .setURL(messageUrl)
+            .setEmoji('🎯')
         );
 
-      await dm.send({ embeds: [embed], components: [row] });
+      await dmChannel.send({ 
+        embeds: [embed], 
+        components: [row]
+      });
+
+      logger.debug(`Sent watchlist DM to ${userId}`);
+      return true;
     } catch (err) {
-      // User has DMs disabled or blocked the bot
-      logger.debug(`Failed to send watchlist DM to ${userId}`, { error: formatError(err) });
+      const errorMsg = formatError(err);
+      if (errorMsg.includes('Cannot send messages to this user')) {
+        logger.debug(`User ${userId} has DMs disabled`);
+      } else if (errorMsg.includes('rate limit')) {
+        logger.warn(`Rate limit hit for user ${userId}`);
+      } else {
+        logger.debug(`Failed to send DM to ${userId}`, { error: errorMsg });
+      }
+      return false;
     }
   }
 
-  async start(): Promise<void> {
-    const LOGIN_TIMEOUT_MS = 10000;
-
-    logger.info('BotManager: attempting login...', { component: 'BotManager' });
-
+  // -------------------------------------------------------------------------
+  // Giveaway Ended Notification (DM)
+  // -------------------------------------------------------------------------
+  public async sendGiveawayEndedDM(
+    userId: string,
+    prize: string,
+    guildName: string,
+    channelName: string,
+    messageUrl: string,
+    guildIcon?: string | null
+  ): Promise<boolean> {
     try {
-      await Promise.race([
-        this.client.login(this.botToken),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Login timed out after 10s')), LOGIN_TIMEOUT_MS)
-        ),
-      ]);
+      let user;
+      try {
+        user = await this.client.users.fetch(userId);
+      } catch {
+        user = this.client.users.cache.get(userId);
+        if (!user) return false;
+      }
 
-      await Promise.race([
-        new Promise<void>((resolve) => {
-          if (this.client.isReady()) {
-            resolve();
-          } else {
-            this.client.once('ready', () => resolve());
-          }
-        }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Ready event timed out after 10s')), LOGIN_TIMEOUT_MS)
-        ),
-      ]);
+      let dmChannel;
+      try {
+        dmChannel = await user.createDM();
+      } catch {
+        return false;
+      }
 
-      logger.info('BotManager started successfully', { component: 'BotManager' });
-    } catch (err) {
-      logger.error(`BotManager start failed: ${formatError(err)}`, { component: 'BotManager' });
-      throw err;
+      if (!dmChannel) return false;
+
+      const embed = new EmbedBuilder()
+        .setAuthor({ name: '🔴 Giveaway Ended', iconURL: this.client.user?.displayAvatarURL() })
+        .setTitle(`🔴 ${prize || 'Giveaway Ended'}`)
+        .setDescription([
+          `**🏠 Server:** ${guildName}`,
+          `**💬 Channel:** #${channelName}`,
+          '',
+          `This giveaway has ended. Better luck next time! 🍀`,
+          '',
+          `[View giveaway](${messageUrl})`
+        ].join('\n'))
+        .setColor(0xFF0000)
+        .setFooter({ text: 'Giveaway tracker', iconURL: this.client.user?.displayAvatarURL() })
+        .setTimestamp();
+
+      if (guildIcon) {
+        embed.setThumbnail(guildIcon);
+      }
+
+      const row = new ActionRowBuilder<ButtonBuilder>()
+        .addComponents(
+          new ButtonBuilder()
+            .setLabel('View Giveaway')
+            .setStyle(ButtonStyle.Link)
+            .setURL(messageUrl)
+            .setEmoji('🔴')
+        );
+
+      await dmChannel.send({ embeds: [embed], components: [row] });
+      return true;
+    } catch {
+      return false;
     }
-  }
-
-  async destroy(): Promise<void> {
-    if (this.presenceInterval) clearInterval(this.presenceInterval);
-    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
-    await this.client.destroy();
   }
 
   // -------------------------------------------------------------------------
@@ -764,13 +846,15 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Cleanup
+  // Cleanup - Also sends ended notifications to watchlist users
   // -------------------------------------------------------------------------
   private async purgeAndUpdatePresence() {
     const removed = await purgeEndedGiveaways();
     if (removed.length > 0) {
       const trackerChannel = this.client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
+      
       for (const giveaway of removed) {
+        // Update the main notification embed
         const notifMsgId = giveaway.notificationMessageId;
         if (notifMsgId && trackerChannel) {
           const msg = await trackerChannel.messages.fetch(notifMsgId).catch(() => null);
@@ -781,6 +865,10 @@ export class BotManager {
             await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
           }
         }
+
+        // Send ended notification to watchlist users who were tracking this giveaway
+        // TODO: Store which users were notified for each giveaway to send ended notifications
+        // For now, this is a placeholder - you'd need to track who got notified
       }
       await this.updatePresence();
     }
@@ -817,7 +905,7 @@ export class BotManager {
             .setDescription('Add an item to watch')
             .addStringOption(opt => 
               opt.setName('item')
-                .setDescription('Item to track (e.g., "vfa", "vsl")')
+                .setDescription('Item to track (e.g., "nitro", "steam")')
                 .setRequired(true)
                 .setMinLength(2)
                 .setMaxLength(50)
