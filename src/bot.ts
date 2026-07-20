@@ -197,7 +197,7 @@ class NotificationService {
     // ✅ Use passed data for banner and thumbnail - this is the key fix for the MAIN SERVER MESSAGE
     const guildIcon = (data as any).guildIcon || guild?.iconURL({ size: 512 }) || null;
     const guildBanner = (data as any).guildBanner || guild?.bannerURL({ size: 1024 }) || null;
-    const memberCount = (data as any).memberCount || guild?.memberCount ?? null;
+    const memberCount = ((data as any).memberCount || guild?.memberCount) ?? null;
     
     // Get invite - try cached, then passed, then generate
     let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite available';
