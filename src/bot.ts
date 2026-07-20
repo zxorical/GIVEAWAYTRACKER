@@ -20,6 +20,7 @@ import {
   ChannelType,
   ButtonInteraction,
   ActivityType,
+  DMChannel,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -33,10 +34,13 @@ import {
   getAllGiveaways,
   purgeEndedGiveaways,
   setNotificationMessageId,
+  addItem,
+  removeItem,
+  getItems,
+  clearItems,
+  getUsersForItem,
 } from './database.js';
 
-// ---------------------------------------------------------------------------
-// We'll define `updateNotificationStatus` later – see database.ts at bottom
 // ---------------------------------------------------------------------------
 declare function updateNotificationStatus(
   messageId: string,
@@ -91,7 +95,7 @@ class MetricsCollector {
 }
 
 // ============================================================================
-// Notification Service (queue, retry, dedup)
+// Notification Service
 // ============================================================================
 
 interface NotificationJob {
@@ -281,7 +285,7 @@ async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>)
 }
 
 // ============================================================================
-// BotManager – orchestrator with commands as methods
+// BotManager
 // ============================================================================
 
 export class BotManager {
@@ -302,6 +306,7 @@ export class BotManager {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.DirectMessages,
       ],
     });
 
@@ -317,6 +322,7 @@ export class BotManager {
     this.commands.set('help', this.helpCommand.bind(this));
     this.commands.set('panel', this.panelCommand.bind(this));
     this.commands.set('purge', this.purgeCommand.bind(this));
+    this.commands.set('watch', this.watchlistCommand.bind(this));
 
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
@@ -363,8 +369,55 @@ export class BotManager {
     return true;
   }
 
+  // -------------------------------------------------------------------------
+  // Public method for watchlist DM notifications
+  // -------------------------------------------------------------------------
+  public async sendWatchlistNotification(
+    userId: string,
+    prize: string,
+    guildName: string,
+    channelName: string,
+    endsAt: number | null,
+    messageUrl: string,
+    guildId?: string
+  ): Promise<void> {
+    try {
+      const user = await this.client.users.fetch(userId);
+      if (!user) return;
+
+      const dmChannel = await user.createDM();
+      if (!dmChannel) return;
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`🎁 ${prize}`)
+        .setDescription([
+          `**Server:** ${guildName}`,
+          `**Channel:** #${channelName}`,
+          endsAt ? `**Ends:** <t:${Math.floor(endsAt / 1000)}:R>` : '',
+          '',
+          `[Jump to giveaway](${messageUrl})`
+        ].filter(Boolean).join('\n'))
+        .setFooter({ text: 'Match from your watchlist' })
+        .setTimestamp();
+
+      const row = new ActionRowBuilder<ButtonBuilder>()
+        .addComponents(
+          new ButtonBuilder()
+            .setLabel('View Giveaway')
+            .setStyle(ButtonStyle.Link)
+            .setURL(messageUrl)
+        );
+
+      await dmChannel.send({ embeds: [embed], components: [row] });
+    } catch (err) {
+      // User has DMs disabled or blocked the bot
+      logger.debug(`Failed to send watchlist DM to ${userId}`, { error: formatError(err) });
+    }
+  }
+
   // ================================================================
-  // FIXED: start() with timeout and proper ready event handling
+  // start() with timeout and proper ready event handling
   // ================================================================
   async start(): Promise<void> {
     const LOGIN_TIMEOUT_MS = 10000;
@@ -372,7 +425,6 @@ export class BotManager {
     logger.info('BotManager: attempting login...', { component: 'BotManager' });
 
     try {
-      // Race login against timeout
       await Promise.race([
         this.client.login(this.botToken),
         new Promise((_, reject) =>
@@ -380,7 +432,6 @@ export class BotManager {
         ),
       ]);
 
-      // Wait for ready event – FIX: resolve() with no argument
       await Promise.race([
         new Promise<void>((resolve) => {
           if (this.client.isReady()) {
@@ -408,7 +459,85 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Commands (methods) – unchanged
+  // Watchlist Commands
+  // -------------------------------------------------------------------------
+
+  private async watchlistCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    const sub = interaction.options.getSubcommand();
+    
+    if (sub === 'add') await this.watchAdd(interaction);
+    else if (sub === 'remove') await this.watchRemove(interaction);
+    else if (sub === 'list') await this.watchList(interaction);
+    else if (sub === 'clear') await this.watchClear(interaction);
+  }
+
+  private async watchAdd(interaction: ChatInputCommandInteraction<CacheType>) {
+    const item = interaction.options.getString('item', true).trim().toLowerCase();
+    
+    if (item.length < 2 || item.length > 50) {
+      await interaction.reply({ content: '❌ Item must be 2-50 characters.', ephemeral: true });
+      return;
+    }
+    
+    await addItem(interaction.user.id, item);
+    const items = await getItems(interaction.user.id);
+    
+    await interaction.reply({
+      content: `✅ Watching **${item}**\n\nYour items:\n${items.map(i => `• ${i}`).join('\n')}`,
+      ephemeral: true
+    });
+  }
+
+  private async watchRemove(interaction: ChatInputCommandInteraction<CacheType>) {
+    const item = interaction.options.getString('item', true).trim().toLowerCase();
+    const removed = await removeItem(interaction.user.id, item);
+    
+    if (!removed) {
+      await interaction.reply({ content: `❌ "${item}" not in your watchlist.`, ephemeral: true });
+      return;
+    }
+    
+    const items = await getItems(interaction.user.id);
+    await interaction.reply({
+      content: `🗑️ Removed **${item}**\n\nYour items:\n${items.map(i => `• ${i}`).join('\n')}`,
+      ephemeral: true
+    });
+  }
+
+  private async watchList(interaction: ChatInputCommandInteraction<CacheType>) {
+    const items = await getItems(interaction.user.id);
+    
+    if (items.length === 0) {
+      await interaction.reply({
+        content: '📭 No items. Use `/watch add <item>` to start tracking giveaways.',
+        ephemeral: true
+      });
+      return;
+    }
+    
+    await interaction.reply({
+      content: `**Your items (${items.length})**\n${items.map(i => `• ${i}`).join('\n')}`,
+      ephemeral: true
+    });
+  }
+
+  private async watchClear(interaction: ChatInputCommandInteraction<CacheType>) {
+    const items = await getItems(interaction.user.id);
+    
+    if (items.length === 0) {
+      await interaction.reply({ content: '📭 Watchlist is empty.', ephemeral: true });
+      return;
+    }
+    
+    await clearItems(interaction.user.id);
+    await interaction.reply({
+      content: `✅ Cleared ${items.length} items.`,
+      ephemeral: true
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Existing Commands (unchanged)
   // -------------------------------------------------------------------------
   private async statsCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     await deferReply(interaction, false);
@@ -539,6 +668,10 @@ export class BotManager {
         { name: '⚙️ /setchannel', value: 'Set notify channel (admin)', inline: false },
         { name: '🗑️ /reset', value: 'Clear database (admin)', inline: false },
         { name: '🔔 /panel', value: 'Resend role panel (admin)', inline: false },
+        { name: '👀 /watch add <item>', value: 'Track giveaway items', inline: false },
+        { name: '👀 /watch remove <item>', value: 'Stop tracking item', inline: false },
+        { name: '👀 /watch list', value: 'Show tracked items', inline: false },
+        { name: '👀 /watch clear', value: 'Clear all items', inline: false },
       )
       .setFooter({ text: 'made by gab' })
       .setTimestamp();
@@ -686,6 +819,38 @@ export class BotManager {
         .addIntegerOption(opt => opt.setName('amount').setDescription('How many'))
         .setDefaultMemberPermissions(0),
       new SlashCommandBuilder().setName('help').setDescription('List commands'),
+      // Watchlist commands
+      new SlashCommandBuilder()
+        .setName('watch')
+        .setDescription('Manage giveaway watchlist')
+        .addSubcommand(sub => 
+          sub.setName('add')
+            .setDescription('Add an item to watch')
+            .addStringOption(opt => 
+              opt.setName('item')
+                .setDescription('Item to track (e.g., "nitro", "steam")')
+                .setRequired(true)
+                .setMinLength(2)
+                .setMaxLength(50)
+            )
+        )
+        .addSubcommand(sub => 
+          sub.setName('remove')
+            .setDescription('Remove an item from watchlist')
+            .addStringOption(opt => 
+              opt.setName('item')
+                .setDescription('Item to remove')
+                .setRequired(true)
+            )
+        )
+        .addSubcommand(sub => 
+          sub.setName('list')
+            .setDescription('Show your tracked items')
+        )
+        .addSubcommand(sub => 
+          sub.setName('clear')
+            .setDescription('Clear all tracked items')
+        ),
     ];
     const rest = new REST({ version: '10' }).setToken(this.botToken);
     try {
