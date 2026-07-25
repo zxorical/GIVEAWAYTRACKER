@@ -63,16 +63,15 @@ export class PremiumPanel {
   }
 
   async handleInteraction(interaction: ButtonInteraction): Promise<void> {
-    if (interaction.customId === 'premium_autojoiner') {
-      // Acknowledge the button press immediately
-      await interaction.deferReply({ ephemeral: true });
-      
-      // Then show the modal after deferral
-      await this.showAutoJoinerModal(interaction);
-    }
-  }
+    if (interaction.customId !== 'premium_autojoiner') return;
 
-  private async showAutoJoinerModal(interaction: ButtonInteraction): Promise<void> {
+    try {
+      // Defer the reply immediately
+      await interaction.deferReply({ ephemeral: true });
+    } catch {
+      // Interaction might already be deferred, continue
+    }
+
     const guildId = interaction.guildId;
     if (!guildId) {
       await interaction.editReply({
