@@ -509,6 +509,11 @@ export async function createLicenseKey(key: string, createdBy: string): Promise<
   });
 }
 
+export async function getLicenseKey(key: string): Promise<LicenseKey | null> {
+  await ensureConnected();
+  return licenseKeysCol.findOne({ key });
+}
+
 export async function validateLicenseKey(key: string): Promise<{
   valid: boolean;
   error?: string;
@@ -560,9 +565,4 @@ export async function getLicenseStats(): Promise<{
   const total = await licenseKeysCol.countDocuments();
   const used = await licenseKeysCol.countDocuments({ used: true });
   return { total, used, unused: total - used };
-}
-
-export async function getLicenseKeyUsage(key: string): Promise<LicenseKey | null> {
-  await ensureConnected();
-  return licenseKeysCol.findOne({ key });
 }
