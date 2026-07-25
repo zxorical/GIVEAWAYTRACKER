@@ -33,7 +33,6 @@ export interface GiveawayData {
   inviteUrl?: string;
   notificationMessageId?: string;
   detectionTimeMs?: number;
-  // ✅ ADD THESE FIELDS FOR BANNER AND THUMBNAIL
   guildIcon?: string | null;
   guildBanner?: string | null;
   memberCount?: number | null;
@@ -85,4 +84,13 @@ export interface UserWatchlist {
   items: string[];
   createdAt: number;
   updatedAt: number;
+}
+
+// License System Types
+export interface LicenseKey {
+  key: string;
+  used: boolean;
+  usedBy: string | null;
+  createdAt: number;
+  createdBy: string;
 }
