@@ -1,3 +1,4 @@
+// src/config.ts
 /**
  * @module config
  * Environment configuration loader with validation
@@ -70,6 +71,14 @@ export const CONFIG: AppConfig = {
     'STATS_INTERVAL_MS', 10000, 3600000
   ),
   adminUserIds: csvEnv('ADMIN_USER_IDS'),
+  // ─── ADD THESE MISSING PROPERTIES ───
+  autoJoinInvites: csvEnv('AUTO_JOIN_INVITES'),
+  webhookUrl: optionalEnv('WEBHOOK_URL', ''),
+  winWebhookUrl: optionalEnv('WIN_WEBHOOK_URL', ''),
+  buttonDelayMs: parseInt(optionalEnv('BUTTON_DELAY_MS', '0')),
+  reactionDelayMs: parseInt(optionalEnv('REACTION_DELAY_MS', '0')),
+  maxRetries: parseInt(optionalEnv('MAX_RETRIES', '3')),
+  retryDelayMs: parseInt(optionalEnv('RETRY_DELAY_MS', '1000')),
 };
 
 CONFIG.monitoredChannels.forEach((id, i) => assertSnowflake(id, `MONITORED_CHANNELS[${i}]`));
@@ -110,3 +119,4 @@ console.log(`  - Notification Cooldown: ${CONFIG.notificationCooldown}s`);
 console.log(`  - Admins: ${CONFIG.adminUserIds.length || 'None'}`);
 console.log(`  - Owner ID: ${ownerId ? 'Set' : 'Missing'}`);
 console.log(`  - Premium Role ID: ${premiumRoleId ? 'Set' : 'Missing'}`);
+console.log(`  - AutoJoin Invites: ${CONFIG.autoJoinInvites.length || 'None'}`);
