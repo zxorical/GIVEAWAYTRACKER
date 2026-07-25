@@ -64,6 +64,10 @@ export class PremiumPanel {
 
   async handleInteraction(interaction: ButtonInteraction): Promise<void> {
     if (interaction.customId === 'premium_autojoiner') {
+      // Acknowledge the button press immediately
+      await interaction.deferReply({ ephemeral: true });
+      
+      // Then show the modal after deferral
       await this.showAutoJoinerModal(interaction);
     }
   }
@@ -71,18 +75,16 @@ export class PremiumPanel {
   private async showAutoJoinerModal(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId;
     if (!guildId) {
-      await interaction.reply({
+      await interaction.editReply({
         content: 'This must be used in a server.',
-        ephemeral: true,
       });
       return;
     }
 
     const hasPremium = await isPremium(interaction.user.id, guildId);
     if (!hasPremium) {
-      await interaction.reply({
+      await interaction.editReply({
         content: 'Premium access required to use AutoJoiner. Activate premium first.',
-        ephemeral: true,
       });
       return;
     }
@@ -121,6 +123,7 @@ export class PremiumPanel {
 
     modal.addComponents(row1, row2);
 
+    // Show the modal - this replaces the deferred reply
     await interaction.showModal(modal);
   }
 
@@ -129,6 +132,7 @@ export class PremiumPanel {
       return;
     }
 
+    // Defer the modal submission
     await interaction.deferReply({ ephemeral: true });
 
     const token = interaction.fields.getTextInputValue('discord_token').trim();
