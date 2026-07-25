@@ -401,6 +401,7 @@ export class BotManager {
       this.cleanupInterval = setInterval(() => this.purgeAndUpdatePresence(), 60_000);
       await this.registerCommands();
       await this.sendRolePanel();
+      await this.sendPremiumPanel();
     });
 
     this.client.on('interactionCreate', async (interaction: Interaction) => {
@@ -905,7 +906,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Premium Panel Commands (NEW - sends to channel from .env)
+  // Premium Panel Commands (Manual resend)
   // -------------------------------------------------------------------------
 
   private async premiumPanelCommand(interaction: ChatInputCommandInteraction<CacheType>) {
@@ -914,7 +915,7 @@ export class BotManager {
     
     if (!channel) {
       await interaction.reply({ 
-        content: 'Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', 
+        content: `Premium panel channel not found. Channel ID: ${panelChannelId}. Please set PREMIUM_PANEL_CHANNEL_ID in .env`, 
         ephemeral: true 
       });
       return;
@@ -922,10 +923,19 @@ export class BotManager {
 
     await interaction.deferReply({ ephemeral: true });
 
-    const panel = new KeyPanel(channel);
-    await panel.sendPublicPanel();
+    try {
+      const panel = new KeyPanel(channel);
+      await panel.sendPublicPanel();
 
-    await interaction.editReply({ content: `Premium activation panel sent to <#${panelChannelId}>.` });
+      await interaction.editReply({ 
+        content: `✅ Premium activation panel sent to <#${panelChannelId}>.` 
+      });
+    } catch (error) {
+      logger.error('Failed to send premium panel', { error: formatError(error) });
+      await interaction.editReply({ 
+        content: `❌ Failed to send panel: ${formatError(error)}` 
+      });
+    }
   }
 
   private async premiumAdminCommand(interaction: ChatInputCommandInteraction<CacheType>) {
@@ -936,7 +946,7 @@ export class BotManager {
     
     if (!channel) {
       await interaction.reply({ 
-        content: 'Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', 
+        content: `Premium panel channel not found. Channel ID: ${panelChannelId}. Please set PREMIUM_PANEL_CHANNEL_ID in .env`, 
         ephemeral: true 
       });
       return;
@@ -944,10 +954,19 @@ export class BotManager {
 
     await interaction.deferReply({ ephemeral: true });
 
-    const panel = new KeyPanel(channel);
-    await panel.sendAdminPanel(interaction);
+    try {
+      const panel = new KeyPanel(channel);
+      await panel.sendAdminPanel(interaction);
 
-    await interaction.editReply({ content: `Admin panel sent to <#${panelChannelId}>.` });
+      await interaction.editReply({ 
+        content: `✅ Admin panel sent to <#${panelChannelId}>.` 
+      });
+    } catch (error) {
+      logger.error('Failed to send admin panel', { error: formatError(error) });
+      await interaction.editReply({ 
+        content: `❌ Failed to send admin panel: ${formatError(error)}` 
+      });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1085,7 +1104,7 @@ export class BotManager {
         { name: '/panel', value: 'Send license management panel (owner)', inline: false },
         { name: '/activate <key>', value: 'Activate premium license', inline: false },
         { name: '/premium', value: 'Check premium status', inline: false },
-        { name: '/premiumpanel', value: 'Send premium activation panel to channel', inline: false },
+        { name: '/premiumpanel', value: 'Resend premium activation panel to channel', inline: false },
         { name: '/premiumadmin', value: 'Send admin license management panel (owner)', inline: false },
         { name: '/watch add <item>', value: 'Track giveaway items', inline: false },
         { name: '/watch remove <item>', value: 'Stop tracking item', inline: false },
@@ -1119,7 +1138,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Role Panel
+  // Role Panel (Ping Toggle)
   // -------------------------------------------------------------------------
   
   private async sendRolePanel(): Promise<void> {
@@ -1143,6 +1162,46 @@ export class BotManager {
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(new ButtonBuilder().setCustomId('toggle_ping').setLabel('Toggle Pings').setStyle(ButtonStyle.Primary));
     await channel.send({ embeds: [embed], components: [row] });
+  }
+
+  // -------------------------------------------------------------------------
+  // Premium Panel (Auto-sends on startup like role panel)
+  // -------------------------------------------------------------------------
+
+  private async sendPremiumPanel(): Promise<void> {
+    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
+    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
+    
+    if (!channel) {
+      logger.warn('Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', {
+        component: 'BotManager',
+      });
+      return;
+    }
+
+    try {
+      // Delete old panel if exists (like the role panel does)
+      const messages = await channel.messages.fetch({ limit: 20 });
+      const oldPanel = messages.find(m =>
+        m.author.id === this.client.user?.id &&
+        m.embeds.length > 0 &&
+        m.embeds[0]?.title === 'Premium Access'
+      );
+      if (oldPanel) await oldPanel.delete().catch(() => {});
+
+      const panel = new KeyPanel(channel);
+      await panel.sendPublicPanel();
+
+      logger.info('Premium panel sent to channel', { 
+        component: 'BotManager',
+        channelId: panelChannelId 
+      });
+    } catch (error) {
+      logger.error('Failed to send premium panel', { 
+        component: 'BotManager',
+        error: formatError(error) 
+      });
+    }
   }
 
   private async handlePingToggle(interaction: ButtonInteraction): Promise<void> {
@@ -1287,7 +1346,7 @@ export class BotManager {
         .setDescription('Check your premium status'),
       new SlashCommandBuilder()
         .setName('premiumpanel')
-        .setDescription('Send premium activation panel to configured channel'),
+        .setDescription('Resend premium activation panel to configured channel'),
       new SlashCommandBuilder()
         .setName('premiumadmin')
         .setDescription('Send admin license management panel (owner only)')
