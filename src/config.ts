@@ -58,7 +58,7 @@ export const CONFIG: AppConfig = {
   botToken: requireEnv('DISCORD_BOT_TOKEN'),
   trackerChannelId: requireEnv('TRACKER_CHANNEL_ID'),
   monitoredChannels: csvEnv('MONITORED_CHANNELS'),
-  dbPath: optionalEnv('DB_PATH', './data/giveaways.json'), // legacy, not used with MongoDB
+  dbPath: optionalEnv('DB_PATH', './data/giveaways.json'),
   logLevel: optionalEnv('LOG_LEVEL', 'info'),
   logDir: optionalEnv('LOG_DIR', './logs'),
   notificationCooldown: assertInt(
@@ -80,18 +80,33 @@ if (CONFIG.tokens.length === 0) {
   throw new Error('At least one token is required in DISCORD_TOKENS');
 }
 
-// Check for MongoDB (not required at config level since database.ts handles the error)
 const mongoUri = process.env.MONGO_URI;
 if (!mongoUri) {
-  console.warn('[Config] ⚠️  MONGO_URI not set — database will not connect');
+  console.warn('[Config] Warning: MONGO_URI not set — database will not connect');
+}
+
+const ownerId = process.env.OWNER_ID;
+if (!ownerId) {
+  console.warn('[Config] Warning: OWNER_ID not set — license panel will not work');
+} else if (!/^\d{17,19}$/.test(ownerId)) {
+  console.warn('[Config] Warning: OWNER_ID is not a valid Discord Snowflake');
+}
+
+const premiumRoleId = process.env.PREMIUM_ROLE_ID;
+if (!premiumRoleId) {
+  console.warn('[Config] Warning: PREMIUM_ROLE_ID not set — premium checks will not work');
+} else if (!/^\d{17,19}$/.test(premiumRoleId)) {
+  console.warn('[Config] Warning: PREMIUM_ROLE_ID is not a valid Discord Snowflake');
 }
 
 console.log('[Config] Loaded successfully');
 console.log(`  - Accounts: ${CONFIG.tokens.length}`);
-console.log(`  - Bot Token: ${CONFIG.botToken ? '✅ Set' : '❌ Missing'}`);
-console.log(`  - Tracker Channel: ${CONFIG.trackerChannelId ? '✅ Set' : '❌ Missing'}`);
+console.log(`  - Bot Token: ${CONFIG.botToken ? 'Set' : 'Missing'}`);
+console.log(`  - Tracker Channel: ${CONFIG.trackerChannelId ? 'Set' : 'Missing'}`);
 console.log(`  - Monitored Channels: ${CONFIG.monitoredChannels.length || 'All'}`);
-console.log(`  - MongoDB: ${mongoUri ? '✅ Set' : '❌ Missing'}`);
+console.log(`  - MongoDB: ${mongoUri ? 'Set' : 'Missing'}`);
 console.log(`  - Log Level: ${CONFIG.logLevel}`);
 console.log(`  - Notification Cooldown: ${CONFIG.notificationCooldown}s`);
 console.log(`  - Admins: ${CONFIG.adminUserIds.length || 'None'}`);
+console.log(`  - Owner ID: ${ownerId ? 'Set' : 'Missing'}`);
+console.log(`  - Premium Role ID: ${premiumRoleId ? 'Set' : 'Missing'}`);
