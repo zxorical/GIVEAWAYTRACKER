@@ -1,3 +1,8 @@
+/**
+ * @module premiumPanel
+ * Premium Panel - AutoJoiner configuration
+ */
+
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -18,7 +23,12 @@ import {
   updateUserWebhook,
 } from '../database.js';
 import { isPremium } from '../license/licenseMiddleware.js';
-import { encryptToken, validateDiscordToken } from './tokenManager.js';
+import {
+  encryptToken,
+  validateDiscordToken,
+  startTokenSession,
+  isSessionActive,
+} from './tokenManager.js';
 import { logger } from '../logger.js';
 
 export class PremiumPanel {
@@ -145,6 +155,9 @@ export class PremiumPanel {
 
         const encryptedToken = encryptToken(token);
         await updateUserToken(interaction.user.id, guildId, encryptedToken, 'main');
+
+        // Start token session
+        startTokenSession(interaction.user.id, guildId, token, 'main');
       }
 
       // Validate webhook format (if provided)
