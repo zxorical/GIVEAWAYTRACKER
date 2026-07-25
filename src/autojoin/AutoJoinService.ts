@@ -7,7 +7,7 @@
  * - Token storage & retrieval (encrypted)
  * - Session management per user
  * - Auto-entry on giveaway detection
- * - Win detection & notifications (webhook only)
+ * - Win detection & notifications (clean webhook only)
  * - Rate limiting & retries
  * - Stats tracking
  */
@@ -46,8 +46,6 @@ const WIN_PATTERNS: ReadonlyArray<RegExp> = [
   /has\s+won\s+(?:the\s+)?giveaway/i,
   /won\s+the\s+giveaway/i,
   /won\s+(?:a\s+)?(?:the\s+)?(?:prize|raffle|giveaway)/i,
-  /🎉\s*congrat/i,
-  /🏆\s*(?:congrat|winner|you)/i,
 ];
 
 // ─── INTERFACES ────────────────────────────────────────────────────
@@ -287,7 +285,7 @@ export class AutoJoinService extends EventEmitter {
     concurrency: number,
   ): Promise<Array<{ userId: string; success: boolean }>> {
     const results: Array<{ userId: string; success: boolean }> = [];
-    const chunks = [];
+    const chunks: Array<Array<{ userId: string; guildId: string }>> = [];
 
     for (let i = 0; i < users.length; i += concurrency) {
       chunks.push(users.slice(i, i + concurrency));
@@ -539,6 +537,9 @@ export class AutoJoinService extends EventEmitter {
     }
   }
 
+  /**
+   * Send clean win webhook - no emojis, just "GIVEAWAY WON" with the win message
+   */
   private async sendWinWebhook(
     userId: string,
     guildId: string,
@@ -548,9 +549,17 @@ export class AutoJoinService extends EventEmitter {
     const webhookUrl = await getUserWebhook(userId, guildId);
     if (!webhookUrl) return;
 
+    // Get the full win message content
+    const winMessage = this.extractAllText(message);
+    
+    // Get jump URL if available
     const jumpUrl = message.guild
       ? `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${message.id}`
       : null;
+
+    // Get server and channel info
+    const serverName = message.guild?.name || 'Direct Message';
+    const channelName = (message.channel as any).name || 'DM';
 
     try {
       await fetch(webhookUrl, {
@@ -558,13 +567,18 @@ export class AutoJoinService extends EventEmitter {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           embeds: [{
-            title: 'Giveaway Win',
+            title: 'GIVEAWAY WON',
             color: 0xFFD700,
             fields: [
-              { name: 'Prize', value: truncate(prize, 100), inline: false },
-              { name: 'Server', value: message.guild?.name || 'DM', inline: true },
-              { name: 'Channel', value: `#${(message.channel as any).name || 'DM'}`, inline: true },
-              ...(jumpUrl ? [{ name: 'Jump', value: `[Link](${jumpUrl})`, inline: false }] : []),
+              { name: 'Prize', value: truncate(prize, 200), inline: false },
+              { name: 'Server', value: serverName, inline: true },
+              { name: 'Channel', value: `#${channelName}`, inline: true },
+              { 
+                name: 'Win Message', 
+                value: truncate(winMessage, 1000), 
+                inline: false 
+              },
+              ...(jumpUrl ? [{ name: 'Link', value: `[View](${jumpUrl})`, inline: false }] : []),
             ],
             timestamp: new Date().toISOString(),
           }],
