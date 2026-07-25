@@ -1,19 +1,93 @@
+/**
+ * @module keyGenerator
+ * License key generation utilities
+ */
+
 import crypto from 'crypto';
-import { createLicenseKey } from '../database.js';
+import { createLicenseKey, getLicenseKey } from '../database.js';
 import { logger } from '../logger.js';
 
-export function generateKey(): string {
-  const prefix = 'VRFS';
-  const segments = [];
-  for (let i = 0; i < 4; i++) {
-    segments.push(crypto.randomBytes(4).toString('hex').toUpperCase());
-  }
-  return `${prefix}-${segments[0]}-${segments[1]}-${segments[2]}-${segments[3]}`;
+const CONFIG = {
+  PREFIX: 'UNTITLED',
+  SEGMENTS: 6,
+  BYTES_PER_SEGMENT: 6,
+  MAX_ATTEMPTS: 10
+};
+
+/**
+ * Generates a secure random key segment
+ */
+function generateSegment(): string {
+  return crypto
+    .randomBytes(CONFIG.BYTES_PER_SEGMENT)
+    .toString('hex')
+    .toUpperCase();
 }
 
+/**
+ * Generates a new license key
+ *
+ * Format: UNTITLED-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
+ */
+export function generateKey(): string {
+  const segments: string[] = [];
+  for (let i = 0; i < CONFIG.SEGMENTS; i++) {
+    segments.push(generateSegment());
+  }
+  return `${CONFIG.PREFIX}-${segments.join('-')}`;
+}
+
+/**
+ * Creates a unique license key
+ */
 export async function createKey(createdBy: string): Promise<string> {
-  const key = generateKey();
-  await createLicenseKey(key, createdBy);
-  logger.info(`License key generated: ${key}`, { createdBy });
-  return key;
+  let attempts = 0;
+
+  while (attempts < CONFIG.MAX_ATTEMPTS) {
+    const key = generateKey();
+    attempts++;
+
+    const existing = await getLicenseKey(key);
+
+    if (!existing) {
+      await createLicenseKey(key, createdBy);
+      logger.info('License key generated', { createdBy });
+      return key;
+    }
+  }
+
+  throw new Error('Failed to generate a unique license key.');
+}
+
+/**
+ * Validates license key format
+ *
+ * Example: UNTITLED-A83F91C2-9B21F4AA-7C81D992-F02A11BC
+ */
+export function isValidKeyFormat(key: string): boolean {
+  const regex = /^UNTITLED-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}$/;
+  return regex.test(key);
+}
+
+/**
+ * Validates license key format with error message
+ */
+export function validateKeyFormat(key: string): {
+  valid: boolean;
+  error?: string;
+} {
+  if (!key || key.length === 0) {
+    return { valid: false, error: 'License key cannot be empty.' };
+  }
+
+  const regex = /^UNTITLED-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}$/;
+  
+  if (!regex.test(key)) {
+    return { 
+      valid: false, 
+      error: 'Invalid license key format. Expected: UNTITLED-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX' 
+    };
+  }
+
+  return { valid: true };
 }
