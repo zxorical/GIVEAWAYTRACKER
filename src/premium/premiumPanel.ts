@@ -65,34 +65,33 @@ export class PremiumPanel {
   async handleInteraction(interaction: ButtonInteraction): Promise<void> {
     if (interaction.customId !== 'premium_autojoiner') return;
 
-    try {
-      // Defer the reply immediately
-      await interaction.deferReply({ ephemeral: true });
-    } catch {
-      // Interaction might already be deferred, continue
-    }
-
+    // Get guild ID first - fast check
     const guildId = interaction.guildId;
     if (!guildId) {
-      await interaction.editReply({
+      await interaction.reply({
         content: 'This must be used in a server.',
+        ephemeral: true,
       });
       return;
     }
 
+    // Check if user has premium - this is the slow part
+    // But we need to do it BEFORE showing the modal
     const hasPremium = await isPremium(interaction.user.id, guildId);
     if (!hasPremium) {
-      await interaction.editReply({
+      await interaction.reply({
         content: 'Premium access required to use AutoJoiner. Activate premium first.',
+        ephemeral: true,
       });
       return;
     }
 
-    // Get existing values
+    // Get existing values - another DB call
     const user = await getPremiumUser(interaction.user.id, guildId);
     const existingToken = user?.token || '';
     const existingWebhook = user?.webhookUrl || '';
 
+    // Build modal
     const modal = new ModalBuilder()
       .setCustomId('premium_autojoiner_modal')
       .setTitle('AutoJoiner Settings');
@@ -122,7 +121,7 @@ export class PremiumPanel {
 
     modal.addComponents(row1, row2);
 
-    // Show the modal - this replaces the deferred reply
+    // Show the modal - must be called within 3 seconds of interaction
     await interaction.showModal(modal);
   }
 
@@ -131,7 +130,6 @@ export class PremiumPanel {
       return;
     }
 
-    // Defer the modal submission
     await interaction.deferReply({ ephemeral: true });
 
     const token = interaction.fields.getTextInputValue('discord_token').trim();
