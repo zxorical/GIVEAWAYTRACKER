@@ -5,7 +5,7 @@
 
 import { MongoClient, Db, Collection, AnyBulkWriteOperation } from 'mongodb';
 import { logger } from './logger.js';
-import { GiveawayData, GiveawayStats, UserWatchlist } from './types.js';
+import { GiveawayData, GiveawayStats, UserWatchlist, LicenseKey } from './types.js';
 
 interface StoredGiveaway {
   messageId: string;
@@ -43,6 +43,7 @@ let db: Db;
 let giveawaysCol: Collection<StoredGiveaway>;
 let countersCol: Collection<TotalCounter>;
 let watchlistCol: Collection<UserWatchlist>;
+let licenseKeysCol: Collection<LicenseKey>;
 
 let connected = false;
 let connectingPromise: Promise<void> | null = null;
@@ -71,6 +72,7 @@ async function connect(): Promise<void> {
       giveawaysCol = db.collection<StoredGiveaway>('giveaways');
       countersCol = db.collection<TotalCounter>('counters');
       watchlistCol = db.collection<UserWatchlist>('watchlists');
+      licenseKeysCol = db.collection<LicenseKey>('license_keys');
 
       await giveawaysCol.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
       await giveawaysCol.createIndex({ status: 1 });
@@ -78,6 +80,8 @@ async function connect(): Promise<void> {
       await giveawaysCol.createIndex({ notificationStatus: 1 });
       await watchlistCol.createIndex({ userId: 1 }, { unique: true });
       await watchlistCol.createIndex({ items: 1 });
+      await licenseKeysCol.createIndex({ key: 1 }, { unique: true });
+      await licenseKeysCol.createIndex({ used: 1 });
 
       const docs = await giveawaysCol.find({}).toArray();
       cache.clear();
@@ -488,4 +492,77 @@ export async function clearItems(userId: string): Promise<void> {
     { userId },
     { $set: { items: [], updatedAt: Date.now() } }
   );
+}
+
+// ---------------------------------------------------------------------------
+// License System API
+// ---------------------------------------------------------------------------
+
+export async function createLicenseKey(key: string, createdBy: string): Promise<void> {
+  await ensureConnected();
+  await licenseKeysCol.insertOne({
+    key,
+    used: false,
+    usedBy: null,
+    createdAt: Date.now(),
+    createdBy,
+  });
+}
+
+export async function validateLicenseKey(key: string): Promise<{
+  valid: boolean;
+  error?: string;
+}> {
+  await ensureConnected();
+
+  const license = await licenseKeysCol.findOne({ key });
+  if (!license) {
+    return { valid: false, error: 'Invalid license key.' };
+  }
+
+  if (license.used) {
+    return { valid: false, error: 'This license key has already been used.' };
+  }
+
+  return { valid: true };
+}
+
+export async function useLicenseKey(key: string, userId: string): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  await ensureConnected();
+
+  const validation = await validateLicenseKey(key);
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
+  await licenseKeysCol.updateOne(
+    { key },
+    { $set: { used: true, usedBy: userId } }
+  );
+
+  return { success: true };
+}
+
+export async function listLicenseKeys(limit: number = 50): Promise<LicenseKey[]> {
+  await ensureConnected();
+  return licenseKeysCol.find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+}
+
+export async function getLicenseStats(): Promise<{
+  total: number;
+  used: number;
+  unused: number;
+}> {
+  await ensureConnected();
+  const total = await licenseKeysCol.countDocuments();
+  const used = await licenseKeysCol.countDocuments({ used: true });
+  return { total, used, unused: total - used };
+}
+
+export async function getLicenseKeyUsage(key: string): Promise<LicenseKey | null> {
+  await ensureConnected();
+  return licenseKeysCol.findOne({ key });
 }
