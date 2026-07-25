@@ -14,6 +14,7 @@ import GiveawayManager from './giveawayManager.js';
 import { BotManager } from './bot.js';
 import { delay, formatError, formatDuration } from './utils.js';
 import { getDb, closeDb, cleanupOldGiveaways } from './database.js';
+import { AutoJoinService } from './autojoin/AutoJoinService.js';
 
 // ----------------------------------------------------------------------------
 // HEALTH SERVER
@@ -59,6 +60,7 @@ let activeManagers: GiveawayManager[] = [];
 let botManager: BotManager | null = null;
 let statsInterval: ReturnType<typeof setInterval> | null = null;
 let shuttingDown = false;
+let autoJoinService: AutoJoinService | null = null;
 
 const CLIENT_READY_TIMEOUT_MS = 60000;
 const MAX_BOOT_RETRIES = 10;
@@ -90,6 +92,12 @@ async function main(): Promise<void> {
 
   // Cleanup old giveaways (fire and forget)
   cleanupOldGiveaways(30).catch(err => logger.warn('cleanupOldGiveaways error', { error: err }));
+
+  // --------------------------------------------------------------------------
+  // INITIALIZE AUTOJOIN SERVICE
+  // --------------------------------------------------------------------------
+  autoJoinService = new AutoJoinService();
+  logger.info('AutoJoinService initialized', { component: 'Bootstrap' });
 
   // --------------------------------------------------------------------------
   // START BOTMANAGER WITH TIMEOUT
@@ -148,7 +156,14 @@ async function main(): Promise<void> {
         logger.error(`[${label}] Client error event: ${formatError(err)}`, { component: 'Client' });
       });
 
-      const manager = new GiveawayManager(client, logger, token, label, botManager);
+      const manager = new GiveawayManager(
+        client,
+        logger,
+        token,
+        label,
+        botManager,
+        autoJoinService // ← Pass AutoJoinService
+      );
       registerDiscordEvents(client, manager);
 
       logger.info(`[${label}] Calling waitForReady...`, { component: 'Bootstrap' });
@@ -209,6 +224,18 @@ async function main(): Promise<void> {
     for (const m of activeManagers) {
       m.logStats();
     }
+    // Log AutoJoinService stats
+    if (autoJoinService) {
+      const stats = autoJoinService.getStats();
+      logger.info('AutoJoinService Stats', {
+        component: 'Bootstrap',
+        sessions: autoJoinService.getActiveSessions(),
+        detected: stats.totalDetected,
+        success: stats.totalSuccess,
+        failed: stats.totalFailed,
+        wins: stats.totalWins,
+      });
+    }
   }, CONFIG.statsIntervalMs);
   statsInterval.unref();
 
@@ -226,7 +253,30 @@ async function main(): Promise<void> {
 // ----------------------------------------------------------------------------
 function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('messageCreate', (msg: Message) => {
-    if (!msg.guild) return;
+    if (!msg.guild) {
+      // Handle DM wins
+      manager.handleDmWin(msg).catch((err) => {
+        logger.error('handleDmWin error', {
+          component: 'Events',
+          messageId: msg.id,
+          error: formatError(err),
+        });
+      });
+      return;
+    }
+
+    // Check for wins from bots
+    if (msg.author?.bot) {
+      manager.handleWin(msg).catch((err) => {
+        logger.error('handleWin error', {
+          component: 'Events',
+          messageId: msg.id,
+          error: formatError(err),
+        });
+      });
+    }
+
+    // Handle giveaway detection
     manager.handleMessage(msg).catch((err) => {
       logger.error('messageCreate handler error', {
         component: 'Events',
@@ -315,6 +365,13 @@ function registerShutdown(): void {
 
     if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
 
+    // Shut down AutoJoinService first
+    if (autoJoinService) {
+      logger.info('Shutting down AutoJoinService...', { component: 'Shutdown' });
+      await autoJoinService.shutdown();
+    }
+
+    // Shut down all giveaway managers
     for (const m of activeManagers) {
       await m.shutdown();
     }
