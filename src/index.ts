@@ -1,3 +1,4 @@
+// src/index.ts
 /**
  * @module index
  * Application entry point – with BotManager timeout and fallback.
@@ -84,6 +85,9 @@ async function main(): Promise<void> {
     trackerChannel: CONFIG.trackerChannelId,
     cooldown: CONFIG.notificationCooldown,
     dbPath: CONFIG.dbPath,
+    autoJoinInvites: CONFIG.autoJoinInvites.length || 0,
+    webhookEnabled: !!CONFIG.webhookUrl,
+    winWebhookEnabled: !!CONFIG.winWebhookUrl,
   });
 
   // Connect DB (await)
@@ -220,6 +224,23 @@ async function main(): Promise<void> {
     failures: authFailures,
   });
 
+  // ── Auto‑join invites for every active account ─────────────────────────
+  if (CONFIG.autoJoinInvites && CONFIG.autoJoinInvites.length > 0) {
+    logger.info(`Auto‑joining ${CONFIG.autoJoinInvites.length} server(s) for each active account`, {
+      component: 'AutoJoin',
+    });
+
+    for (let i = 0; i < activeManagers.length; i++) {
+      const manager = activeManagers[i]!;
+      if (i > 0) {
+        await delay(5000);
+      }
+      await autoJoinForManager(manager);
+    }
+
+    logger.info('Auto‑join complete for all accounts', { component: 'AutoJoin' });
+  }
+
   statsInterval = setInterval(() => {
     for (const m of activeManagers) {
       m.logStats();
@@ -317,6 +338,82 @@ function registerDiscordEvents(client: Client, manager: GiveawayManager): void {
   client.on('disconnect', () => logger.warn('Disconnected', { component: 'Events' }));
   client.on('reconnecting', () => logger.info('Reconnecting...', { component: 'Events' }));
   client.on('error', (err) => logger.error('Client error', { component: 'Events', error: err }));
+}
+
+// ----------------------------------------------------------------------------
+// AUTO-JOIN FOR MANAGER
+// ----------------------------------------------------------------------------
+async function autoJoinForManager(manager: GiveawayManager): Promise<void> {
+  const invites = CONFIG.autoJoinInvites || [];
+  
+  for (let i = 0; i < invites.length; i++) {
+    const raw = invites[i]!;
+    const parsed = parseInvite(raw);
+
+    if (!parsed.isValid || !parsed.code) {
+      logger.warn(`Could not parse invite #${i + 1} – skipping`, { 
+        component: 'AutoJoin', 
+        raw 
+      });
+      manager.recordServerJoin(false);
+      continue;
+    }
+
+    const { code, url } = parsed;
+    logger.info(`Joining [${i + 1}/${invites.length}]: ${url ?? code}`, { 
+      component: 'AutoJoin' 
+    });
+
+    try {
+      const client = (manager as any).client as Client;
+      await joinByInvite(client, code);
+      logger.info(`Joined via ${code}`, { component: 'AutoJoin' });
+      manager.recordServerJoin(true);
+    } catch (err: unknown) {
+      logger.error(`Failed to join via ${code}`, { 
+        component: 'AutoJoin', 
+        error: formatError(err) 
+      });
+      manager.recordServerJoin(false);
+    }
+
+    if (i < invites.length - 1) {
+      await delay(3500);
+    }
+  }
+}
+
+async function joinByInvite(client: Client, code: string): Promise<void> {
+  const selfbot = client as Client & { acceptInvite?: (code: string) => Promise<any> };
+  if (typeof selfbot.acceptInvite === 'function') {
+    await selfbot.acceptInvite(code);
+    return;
+  }
+
+  const invite = await client.fetchInvite(code);
+  if (invite.guild && client.guilds.cache.has(invite.guild.id)) {
+    logger.info(`Already in "${invite.guild.name}" – skipping`, { component: 'AutoJoin' });
+    return;
+  }
+
+  throw new Error(`Cannot join "${code}" – acceptInvite not available`);
+}
+
+function parseInvite(input: string): { isValid: boolean; code: string | null; url: string | null } {
+  const trimmed = input.trim();
+  
+  // Try to extract code from URL
+  const urlMatch = trimmed.match(/(?:https?:\/\/)?(?:discord\.gg|discord\.com\/invite)\/([a-zA-Z0-9-]{2,20})/i);
+  if (urlMatch) {
+    return { isValid: true, code: urlMatch[1], url: trimmed };
+  }
+  
+  // Assume it's just a code
+  if (/^[a-zA-Z0-9-]{2,20}$/.test(trimmed)) {
+    return { isValid: true, code: trimmed, url: `https://discord.gg/${trimmed}` };
+  }
+  
+  return { isValid: false, code: null, url: null };
 }
 
 // ----------------------------------------------------------------------------
