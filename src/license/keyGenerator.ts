@@ -27,7 +27,7 @@ function generateSegment(): string {
 /**
  * Generates a new license key
  *
- * Format: UNTITLED-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
+ * Format: UNTITLED-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX
  */
 export function generateKey(): string {
   const segments: string[] = [];
@@ -62,10 +62,11 @@ export async function createKey(createdBy: string): Promise<string> {
 /**
  * Validates license key format
  *
- * Example: UNTITLED-A83F91C2-9B21F4AA-7C81D992-F02A11BC
+ * Example: UNTITLED-A83F91C2-9B21F4AA-7C81D992-F02A11BC-91AF83D9-21BCA81F-92CC31DA
  */
 export function isValidKeyFormat(key: string): boolean {
-  const regex = /^UNTITLED-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}$/;
+  // 7 segments of 12 hex characters each (6 bytes)
+  const regex = /^UNTITLED-[A-F0-9]{12}(?:-[A-F0-9]{12}){6}$/;
   return regex.test(key);
 }
 
@@ -80,12 +81,12 @@ export function validateKeyFormat(key: string): {
     return { valid: false, error: 'License key cannot be empty.' };
   }
 
-  const regex = /^UNTITLED-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}-[A-F0-9]{8}$/;
+  const regex = /^UNTITLED-[A-F0-9]{12}(?:-[A-F0-9]{12}){6}$/;
   
   if (!regex.test(key)) {
     return { 
       valid: false, 
-      error: 'Invalid license key format. Expected: UNTITLED-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX' 
+      error: 'Invalid license key format. Expected: UNTITLED-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX' 
     };
   }
 
