@@ -27,7 +27,6 @@ import {
   encryptToken,
   validateDiscordToken,
   startTokenSession,
-  stopTokenSession,
   isSessionActive,
 } from './tokenManager.js';
 import { logger } from '../logger.js';
