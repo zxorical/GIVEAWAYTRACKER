@@ -117,7 +117,6 @@ export class KeyPanel {
     await interaction.editReply({
       embeds: [embed],
       components: [row],
-      ephemeral: true,
     });
   }
 
