@@ -610,20 +610,25 @@ export async function setPremiumUser(
 ): Promise<void> {
   await ensureConnected();
 
+  // Build the update object conditionally
+  const updateData: any = {
+    userId,
+    guildId,
+    isPremium: true,
+    source,
+    activatedAt: Date.now(),
+    expiresAt: null,
+    lastChecked: Date.now(),
+  };
+
+  // Only add licenseKey if it's provided
+  if (licenseKey) {
+    updateData.licenseKey = licenseKey;
+  }
+
   await premiumUsersCol.updateOne(
     { userId, guildId },
-    {
-      $set: {
-        userId,
-        guildId,
-        isPremium: true,
-        source,
-        licenseKey: licenseKey || null,
-        activatedAt: Date.now(),
-        expiresAt: null,
-        lastChecked: Date.now(),
-      }
-    },
+    { $set: updateData },
     { upsert: true }
   );
 
