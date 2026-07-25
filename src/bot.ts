@@ -22,11 +22,6 @@ import {
   ActivityType,
   Collection,
   Invite,
-  GuildBasedChannel,
-  NewsChannel,
-  StageChannel,
-  VoiceChannel,
-  ThreadChannel,
 } from 'discord.js';
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
@@ -44,7 +39,15 @@ import {
   removeItem,
   getItems,
   clearItems,
+  useLicenseKey,
 } from './database.js';
+import { KeyPanel } from './license/keyPanel.js';
+import {
+  isPremium,
+  requirePremium,
+  setClient,
+  assignPremiumRole,
+} from './license/licenseMiddleware.js';
 
 declare function updateNotificationStatus(
   messageId: string,
@@ -190,30 +193,24 @@ class NotificationService {
 
     const data = job.data;
     
-    // Try to get guild from cache, but use passed data as fallback
     const guild = this.bot.guilds.cache.get(data.guildId);
     const guildName = guild?.name || data.guildName || 'Unknown';
     
-    // ✅ Use passed data for banner and thumbnail - this is the key fix for the MAIN SERVER MESSAGE
     const guildIcon = (data as any).guildIcon || guild?.iconURL({ size: 512 }) || null;
     const guildBanner = (data as any).guildBanner || guild?.bannerURL({ size: 1024 }) || null;
     const memberCount = ((data as any).memberCount || guild?.memberCount) ?? null;
     
-    // Get invite - try cached, then passed, then generate
     let inviteUrl = (data as any).cachedInviteUrl || data.inviteUrl || 'No invite available';
     
-    // If no invite, try to generate one
     if (inviteUrl === 'No invite available' && data.guildId) {
       try {
         const guild = this.bot.guilds.cache.get(data.guildId);
         if (guild) {
-          // Try existing invites first
           const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
           const existingInvite = invites.find((inv: Invite) => inv.channelId === data.channelId && inv.maxUses === 0);
           if (existingInvite) {
             inviteUrl = existingInvite.url;
           } else {
-            // Create new invite
             const channel = guild.channels.cache.get(data.channelId);
             if (channel && channel.isTextBased() && 'createInvite' in channel) {
               const perms = channel.permissionsFor(this.bot.user?.id || '');
@@ -257,7 +254,6 @@ class NotificationService {
       memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
     ].filter(Boolean).join('\n');
 
-    // Build the embed with proper order for the MAIN SERVER MESSAGE
     const embed = new EmbedBuilder()
       .setAuthor({ 
         name: 'New Giveaway', 
@@ -268,18 +264,14 @@ class NotificationService {
       .setColor(0x5865F2)
       .setTimestamp(data.detectedAt);
 
-    // ✅ MAIN SERVER MESSAGE - Set thumbnail (server icon) if available
     if (guildIcon) {
       embed.setThumbnail(guildIcon);
     }
 
-    // ✅ MAIN SERVER MESSAGE - Set banner (server banner) if available
-    // This will display as a large image at the bottom of the embed
     if (guildBanner) {
       embed.setImage(guildBanner);
     }
 
-    // Set footer with detection time
     embed.setFooter({ 
       text: `Detected in ${detectionTime}ms`, 
       iconURL: this.bot.user?.displayAvatarURL() 
@@ -334,9 +326,21 @@ function isAdmin(userId: string): boolean {
   return CONFIG.adminUserIds.includes(userId);
 }
 
+function isOwner(userId: string): boolean {
+  return userId === process.env.OWNER_ID;
+}
+
 async function requireAdmin(interaction: ChatInputCommandInteraction<CacheType>): Promise<boolean> {
   if (!isAdmin(interaction.user.id)) {
     await interaction.reply({ content: 'No permission.', ephemeral: true });
+    return false;
+  }
+  return true;
+}
+
+async function requireOwner(interaction: ChatInputCommandInteraction<CacheType>): Promise<boolean> {
+  if (!isOwner(interaction.user.id)) {
+    await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
     return false;
   }
   return true;
@@ -368,6 +372,9 @@ export class BotManager {
       ],
     });
 
+    // Set client reference for license middleware
+    setClient(this.client);
+
     this.notifications = new NotificationService(this.client, this.metrics);
 
     this.commands.set('stats', this.statsCommand.bind(this));
@@ -381,6 +388,8 @@ export class BotManager {
     this.commands.set('panel', this.panelCommand.bind(this));
     this.commands.set('purge', this.purgeCommand.bind(this));
     this.commands.set('watch', this.watchlistCommand.bind(this));
+    this.commands.set('activate', this.activateCommand.bind(this));
+    this.commands.set('premium', this.premiumCommand.bind(this));
 
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
@@ -396,9 +405,30 @@ export class BotManager {
       if (interaction.isButton()) {
         if (interaction.customId === 'toggle_ping') {
           await this.handlePingToggle(interaction);
+          return;
+        }
+
+        if (['generate_key', 'list_keys', 'refresh_stats'].includes(interaction.customId)) {
+          if (!isOwner(interaction.user.id)) {
+            await interaction.reply({ 
+              content: 'You do not have permission to use this panel.', 
+              ephemeral: true 
+            });
+            return;
+          }
+
+          const channel = interaction.channel as TextChannel;
+          const panel = new KeyPanel(channel);
+          await panel.handleInteraction(interaction);
+          return;
         }
         return;
       }
+
+      if (interaction.isModalSubmit()) {
+        return;
+      }
+
       if (!interaction.isChatInputCommand()) return;
       const handler = this.commands.get(interaction.commandName);
       if (!handler) {
@@ -468,11 +498,10 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Helper: Resolve Invite URL (same logic as sendOne, used by DMs too)
+  // Helper: Resolve Invite URL
   // -------------------------------------------------------------------------
   
   private async resolveInviteUrl(guildId: string, channelId: string, fallbackInvite?: string | null): Promise<string> {
-    // If we already have a valid invite, use it
     if (fallbackInvite && fallbackInvite.startsWith('http')) {
       return fallbackInvite;
     }
@@ -481,13 +510,11 @@ export class BotManager {
     try {
       const guild = this.client.guilds.cache.get(guildId);
       if (guild) {
-        // Try existing invites first
         const invites = await guild.invites.fetch().catch(() => new Collection<string, Invite>());
         const existingInvite = invites.find((inv: Invite) => inv.channelId === channelId && inv.maxUses === 0);
         if (existingInvite) {
           inviteUrl = existingInvite.url;
         } else {
-          // Create new invite
           const channel = guild.channels.cache.get(channelId);
           if (channel && channel.isTextBased() && 'createInvite' in channel) {
             const perms = channel.permissionsFor(this.client.user?.id || '');
@@ -510,7 +537,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Watchlist DM - Now matches the main server message format EXACTLY
+  // Watchlist DM
   // -------------------------------------------------------------------------
   
   public async sendWatchlistDM(
@@ -548,11 +575,9 @@ export class BotManager {
 
       if (!dmChannel) return false;
 
-      // Extract channel ID from message URL
       const urlParts = messageUrl.split('/');
       const channelId = urlParts[5] || '';
 
-      // Resolve the invite URL
       let resolvedInvite = 'No invite available';
       if (guildId && channelId) {
         resolvedInvite = await this.resolveInviteUrl(guildId, channelId, inviteUrl);
@@ -564,7 +589,6 @@ export class BotManager {
       const winnerCount = extractWinnerCount(prize);
       const detectionTime = detectedAt ? Date.now() - detectedAt : 0;
 
-      // ✅ SAME description as the main server message
       const description = [
         `### Details`,
         `**Server:** ${guildName}`,
@@ -580,7 +604,6 @@ export class BotManager {
         memberCount ? `**Members:** ${memberCount.toLocaleString()}` : '',
       ].filter(Boolean).join('\n');
 
-      // ✅ SAME embed structure as the main server message
       const embed = new EmbedBuilder()
         .setAuthor({ 
           name: 'New Giveaway', 
@@ -591,23 +614,19 @@ export class BotManager {
         .setColor(0x5865F2)
         .setTimestamp(detectedAt);
 
-      // ✅ Set thumbnail if available (same as main)
       if (guildIcon) {
         embed.setThumbnail(guildIcon);
       }
 
-      // ✅ Set banner if available (same as main)
       if (guildBanner) {
         embed.setImage(guildBanner);
       }
 
-      // ✅ Same footer as main
       embed.setFooter({ 
         text: `Detected in ${detectionTime}ms`, 
         iconURL: this.client.user?.displayAvatarURL() 
       });
 
-      // ✅ Same buttons as main
       const row = new ActionRowBuilder<ButtonBuilder>();
       if (resolvedInvite.startsWith('http')) {
         row.addComponents(new ButtonBuilder().setLabel('Join Server').setStyle(ButtonStyle.Link).setURL(resolvedInvite));
@@ -785,6 +804,90 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
+  // License Commands
+  // -------------------------------------------------------------------------
+
+  private async panelCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    if (!await requireOwner(interaction)) return;
+
+    const channel = interaction.channel as TextChannel;
+    if (!channel) {
+      await interaction.reply({ 
+        content: 'This command must be used in a channel.', 
+        ephemeral: true 
+      });
+      return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const panel = new KeyPanel(channel);
+    await panel.sendPanel();
+
+    await interaction.editReply({ content: 'License management panel sent to this channel.' });
+  }
+
+  private async activateCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    const key = interaction.options.getString('key', true).trim().toUpperCase();
+
+    await interaction.deferReply({ ephemeral: true });
+
+    // Validate and use the key
+    const result = await useLicenseKey(key, interaction.user.id);
+
+    if (!result.success) {
+      await interaction.editReply({
+        content: `Activation failed: ${result.error || 'Unknown error'}`,
+      });
+      return;
+    }
+
+    // Assign the premium role
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      await interaction.editReply({
+        content: 'Activation failed: This command must be used in a server.',
+      });
+      return;
+    }
+
+    const roleResult = await assignPremiumRole(interaction.user.id, guildId);
+
+    if (!roleResult.success) {
+      await interaction.editReply({
+        content: `Activation failed: ${roleResult.error || 'Could not assign premium role.'}`,
+      });
+      return;
+    }
+
+    await interaction.editReply({
+      content: 'Premium activated successfully. You now have access to premium features.',
+    });
+  }
+
+  private async premiumCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    await interaction.deferReply({ ephemeral: true });
+
+    const premium = await isPremium(interaction.user.id, interaction.guildId || undefined);
+
+    if (!premium) {
+      await interaction.editReply({
+        content: [
+          'You do not have premium access.',
+          '',
+          'To activate premium, use: `/activate <key>`',
+          'Contact an administrator to obtain a license key.',
+        ].join('\n'),
+      });
+      return;
+    }
+
+    await interaction.editReply({
+      content: 'You have premium access.',
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Existing Commands
   // -------------------------------------------------------------------------
   
@@ -916,7 +1019,9 @@ export class BotManager {
         { name: '/metrics', value: 'Performance metrics (admin)', inline: false },
         { name: '/setchannel', value: 'Set notify channel (admin)', inline: false },
         { name: '/reset', value: 'Clear database (admin)', inline: false },
-        { name: '/panel', value: 'Resend role panel (admin)', inline: false },
+        { name: '/panel', value: 'Send license management panel (owner)', inline: false },
+        { name: '/activate <key>', value: 'Activate premium license', inline: false },
+        { name: '/premium', value: 'Check premium status', inline: false },
         { name: '/watch add <item>', value: 'Track giveaway items', inline: false },
         { name: '/watch remove <item>', value: 'Stop tracking item', inline: false },
         { name: '/watch list', value: 'Show tracked items', inline: false },
@@ -925,13 +1030,6 @@ export class BotManager {
       .setFooter({ text: 'made by gab' })
       .setTimestamp();
     await interaction.editReply({ embeds: [embed] });
-  }
-
-  private async panelCommand(interaction: ChatInputCommandInteraction<CacheType>) {
-    if (!await requireAdmin(interaction)) return;
-    await deferReply(interaction, true);
-    await this.sendRolePanel();
-    await interaction.editReply({ content: 'Panel sent.' });
   }
 
   private async purgeCommand(interaction: ChatInputCommandInteraction<CacheType>) {
@@ -1025,7 +1123,7 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Cleanup - Also sends ended notifications to watchlist users
+  // Cleanup
   // -------------------------------------------------------------------------
   
   private async purgeAndUpdatePresence() {
@@ -1034,7 +1132,6 @@ export class BotManager {
       const trackerChannel = this.client.channels.cache.get(CONFIG.trackerChannelId) as TextChannel | undefined;
 
       for (const giveaway of removed) {
-        // Update the main notification embed
         const notifMsgId = giveaway.notificationMessageId;
         if (notifMsgId && trackerChannel) {
           const msg = await trackerChannel.messages.fetch(notifMsgId).catch(() => null);
@@ -1108,6 +1205,21 @@ export class BotManager {
           sub.setName('clear')
             .setDescription('Clear all tracked items')
         ),
+      new SlashCommandBuilder()
+        .setName('panel')
+        .setDescription('Send license management panel (owner only)')
+        .setDefaultMemberPermissions(0),
+      new SlashCommandBuilder()
+        .setName('activate')
+        .setDescription('Activate a premium license key')
+        .addStringOption(opt =>
+          opt.setName('key')
+            .setDescription('Your license key')
+            .setRequired(true)
+        ),
+      new SlashCommandBuilder()
+        .setName('premium')
+        .setDescription('Check your premium status'),
     ];
     const rest = new REST({ version: '10' }).setToken(this.botToken);
     try {
