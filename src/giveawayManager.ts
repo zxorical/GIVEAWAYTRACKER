@@ -32,6 +32,7 @@ import {
   getAllWatchlists,
 } from './database.js';
 import { BotManager } from './bot.js';
+import { AutoJoinService } from './autojoin/AutoJoinService.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,6 +141,7 @@ export class GiveawayManager extends EventEmitter {
   private readonly accountLabel: string;
   private readonly botManager: BotManager | null;
   private readonly userToken: string;
+  private readonly autoJoinService: AutoJoinService | null;
 
   private processingMessages = new Set<string>();
 
@@ -173,6 +175,7 @@ export class GiveawayManager extends EventEmitter {
     token: string,
     accountLabel: string,
     botManager: BotManager | null,
+    autoJoinService: AutoJoinService | null = null,
   ) {
     super();
     this.client = client;
@@ -180,6 +183,7 @@ export class GiveawayManager extends EventEmitter {
     this.accountLabel = accountLabel;
     this.botManager = botManager;
     this.userToken = token;
+    this.autoJoinService = autoJoinService;
 
     // Start the invite refresher
     this.startInviteRefresher();
@@ -191,8 +195,20 @@ export class GiveawayManager extends EventEmitter {
   public async handleMessage(message: Message): Promise<void> {
     const receivedAt = Date.now();
 
-    if (!message.guild) return;
+    // ─── CHECK DM WINS FOR PREMIUM USERS ───
+    if (!message.guild) {
+      if (this.autoJoinService) {
+        await this.autoJoinService.checkDmWin(message);
+      }
+      return;
+    }
+
     if (message.author?.id === this.client.user?.id) return;
+
+    // ─── CHECK GUILD WINS FOR PREMIUM USERS ───
+    if (message.author?.bot && this.autoJoinService) {
+      await this.autoJoinService.checkGuildWin(message);
+    }
 
     if (
       CONFIG.monitoredChannels.length > 0 &&
@@ -235,6 +251,20 @@ export class GiveawayManager extends EventEmitter {
       if (!detected) {
         this.stats.falsePositivesBlocked++;
         return;
+      }
+
+      // ─── TRIGGER PREMIUM USER AUTOJOIN ───
+      if (this.autoJoinService && detected.buttonCustomId) {
+        await this.autoJoinService.handleGiveawayDetected({
+          messageId: message.id,
+          channelId: message.channel.id,
+          guildId: message.guild.id,
+          guildName: message.guild.name,
+          channelName: (message.channel as any).name || 'unknown',
+          prize: detected.prize,
+          buttonCustomId: detected.buttonCustomId,
+          detectedAt: Date.now(),
+        });
       }
 
       const detectionTime = Date.now() - receivedAt;
