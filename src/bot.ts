@@ -1187,7 +1187,7 @@ export class BotManager {
       const oldPanel = messages.find(m =>
         m.author.id === this.client.user?.id &&
         m.embeds.length > 0 &&
-        m.embeds[0]?.title === 'Premium License'
+        m.embeds[0]?.title === 'Premium Access'
       );
       if (oldPanel) await oldPanel.delete().catch(() => {});
 
