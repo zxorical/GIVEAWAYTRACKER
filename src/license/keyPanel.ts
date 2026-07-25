@@ -33,7 +33,7 @@ export class KeyPanel {
   // PUBLIC PANEL - Clean, minimal, no stats
   // ============================================================================
 
-  async sendPublicPanel(): Promise<void> {
+  async sendPanel(): Promise<void> {
     if (this.panelMessage) {
       try { await this.panelMessage.delete(); } catch {}
     }
@@ -150,7 +150,7 @@ export class KeyPanel {
       .setPlaceholder('UNTITLED-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX')
       .setRequired(true)
       .setMinLength(20)
-      .setMaxLength(120);  // ← FIXED: Increased to 120
+      .setMaxLength(120);
 
     const row = new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput);
     modal.addComponents(row);
