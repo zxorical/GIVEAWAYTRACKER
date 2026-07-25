@@ -390,6 +390,8 @@ export class BotManager {
     this.commands.set('watch', this.watchlistCommand.bind(this));
     this.commands.set('activate', this.activateCommand.bind(this));
     this.commands.set('premium', this.premiumCommand.bind(this));
+    this.commands.set('premiumpanel', this.premiumPanelCommand.bind(this));
+    this.commands.set('premiumadmin', this.premiumAdminCommand.bind(this));
 
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
@@ -408,6 +410,15 @@ export class BotManager {
           return;
         }
 
+        // Handle premium panel buttons (public and admin)
+        if (['activate_premium', 'check_premium', 'admin_generate_key', 'admin_list_keys', 'admin_refresh'].includes(interaction.customId)) {
+          const channel = interaction.channel as TextChannel;
+          const panel = new KeyPanel(channel);
+          await panel.handleInteraction(interaction);
+          return;
+        }
+
+        // Handle old panel buttons (for backward compatibility)
         if (['generate_key', 'list_keys', 'refresh_stats'].includes(interaction.customId)) {
           if (!isOwner(interaction.user.id)) {
             await interaction.reply({ 
@@ -426,6 +437,12 @@ export class BotManager {
       }
 
       if (interaction.isModalSubmit()) {
+        if (interaction.customId === 'activate_premium_modal') {
+          const channel = interaction.channel as TextChannel;
+          const panel = new KeyPanel(channel);
+          await panel.handleModalSubmit(interaction);
+          return;
+        }
         return;
       }
 
@@ -888,6 +905,52 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
+  // Premium Panel Commands (NEW - sends to channel from .env)
+  // -------------------------------------------------------------------------
+
+  private async premiumPanelCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
+    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
+    
+    if (!channel) {
+      await interaction.reply({ 
+        content: 'Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', 
+        ephemeral: true 
+      });
+      return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const panel = new KeyPanel(channel);
+    await panel.sendPublicPanel();
+
+    await interaction.editReply({ content: `Premium activation panel sent to <#${panelChannelId}>.` });
+  }
+
+  private async premiumAdminCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+    if (!await requireOwner(interaction)) return;
+
+    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
+    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
+    
+    if (!channel) {
+      await interaction.reply({ 
+        content: 'Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', 
+        ephemeral: true 
+      });
+      return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const panel = new KeyPanel(channel);
+    await panel.sendAdminPanel(interaction);
+
+    await interaction.editReply({ content: `Admin panel sent to <#${panelChannelId}>.` });
+  }
+
+  // -------------------------------------------------------------------------
   // Existing Commands
   // -------------------------------------------------------------------------
   
@@ -1022,6 +1085,8 @@ export class BotManager {
         { name: '/panel', value: 'Send license management panel (owner)', inline: false },
         { name: '/activate <key>', value: 'Activate premium license', inline: false },
         { name: '/premium', value: 'Check premium status', inline: false },
+        { name: '/premiumpanel', value: 'Send premium activation panel to channel', inline: false },
+        { name: '/premiumadmin', value: 'Send admin license management panel (owner)', inline: false },
         { name: '/watch add <item>', value: 'Track giveaway items', inline: false },
         { name: '/watch remove <item>', value: 'Stop tracking item', inline: false },
         { name: '/watch list', value: 'Show tracked items', inline: false },
@@ -1220,6 +1285,13 @@ export class BotManager {
       new SlashCommandBuilder()
         .setName('premium')
         .setDescription('Check your premium status'),
+      new SlashCommandBuilder()
+        .setName('premiumpanel')
+        .setDescription('Send premium activation panel to configured channel'),
+      new SlashCommandBuilder()
+        .setName('premiumadmin')
+        .setDescription('Send admin license management panel (owner only)')
+        .setDefaultMemberPermissions(0),
     ];
     const rest = new REST({ version: '10' }).setToken(this.botToken);
     try {
