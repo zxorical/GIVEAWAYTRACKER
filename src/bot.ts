@@ -40,6 +40,18 @@ import {
   getItems,
   clearItems,
   useLicenseKey,
+  setPremiumUser,
+  removePremiumUser,
+  getPremiumUser,
+  isPremiumUser,
+  setBoosterPremium,
+  getBoosterPremium,
+  getActiveBoosters,
+  removeBoosterPremium,
+  updateBoosterPremiumStatus,
+  getBoosterPremiumStats,
+  getAllPremiumUsers,
+  getPremiumStats,
 } from './database.js';
 import { KeyPanel } from './license/keyPanel.js';
 import {
@@ -47,6 +59,8 @@ import {
   requirePremium,
   setClient,
   assignPremiumRole,
+  addPremiumUser,
+  removePremiumUser as removePremiumUserService,
 } from './license/licenseMiddleware.js';
 
 declare function updateNotificationStatus(
@@ -393,6 +407,11 @@ export class BotManager {
     this.commands.set('premiumpanel', this.premiumPanelCommand.bind(this));
     this.commands.set('premiumadmin', this.premiumAdminCommand.bind(this));
 
+    // --- Booster Listeners ---
+    this.client.on('guildMemberUpdate', this.handleGuildMemberUpdate.bind(this));
+    this.client.on('guildMemberAdd', this.handleGuildMemberAdd.bind(this));
+
+    // --- Ready Event ---
     this.client.once('ready', async () => {
       logger.info(`Logged in as ${this.client.user?.tag}`, { component: 'BotManager' });
       await this.updatePresence();
@@ -402,8 +421,12 @@ export class BotManager {
       await this.registerCommands();
       await this.sendRolePanel();
       await this.sendPremiumPanel();
+
+      // Auto-assign premium to existing boosters on startup
+      await this.assignPremiumToExistingBoosters();
     });
 
+    // --- Interaction Handler ---
     this.client.on('interactionCreate', async (interaction: Interaction) => {
       if (interaction.isButton()) {
         if (interaction.customId === 'toggle_ping') {
@@ -893,7 +916,7 @@ export class BotManager {
         content: [
           'You do not have premium access.',
           '',
-          'To activate premium, use: `/activate <key>`',
+          'To activate premium, use: `/activate <key>` or boost the server.',
           'Contact an administrator to obtain a license key.',
         ].join('\n'),
       });
@@ -1200,6 +1223,157 @@ export class BotManager {
       logger.error('Failed to send premium panel', { 
         component: 'BotManager',
         error: formatError(error) 
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Booster Handlers
+  // -------------------------------------------------------------------------
+
+  private async handleGuildMemberUpdate(oldMember: any, newMember: any): Promise<void> {
+    const guildId = process.env.GUILD_ID;
+    if (!guildId) return;
+    if (newMember.guild.id !== guildId) return;
+
+    const boosterRoleId = process.env.BOOSTER_ROLE_ID;
+    const premiumRoleId = process.env.PREMIUM_ROLE_ID;
+
+    if (!boosterRoleId || !premiumRoleId) {
+      return;
+    }
+
+    const oldRoles = oldMember.roles.cache;
+    const newRoles = newMember.roles.cache;
+
+    const hadBooster = oldRoles.has(boosterRoleId);
+    const hasBooster = newRoles.has(boosterRoleId);
+
+    // User just boosted - add premium
+    if (!hadBooster && hasBooster) {
+      try {
+        // Add premium role
+        await newMember.roles.add(premiumRoleId);
+        
+        // Update database
+        await setPremiumUser(newMember.id, guildId, 'booster');
+        await setBoosterPremium(newMember.id, guildId, true);
+        
+        logger.info('Premium role added to booster', {
+          userId: newMember.id,
+        });
+      } catch (error) {
+        logger.error('Failed to add premium role to booster', {
+          userId: newMember.id,
+          error: String(error),
+        });
+      }
+      return;
+    }
+
+    // User just unboosted - remove premium
+    if (hadBooster && !hasBooster) {
+      try {
+        // Remove premium role
+        await newMember.roles.remove(premiumRoleId);
+        
+        // Update database
+        await removePremiumUser(newMember.id, guildId);
+        await removeBoosterPremium(newMember.id, guildId);
+        
+        logger.info('Premium role removed from unbooster', {
+          userId: newMember.id,
+        });
+      } catch (error) {
+        logger.error('Failed to remove premium role from unbooster', {
+          userId: newMember.id,
+          error: String(error),
+        });
+      }
+      return;
+    }
+  }
+
+  private async handleGuildMemberAdd(member: any): Promise<void> {
+    const guildId = process.env.GUILD_ID;
+    if (!guildId) return;
+    if (member.guild.id !== guildId) return;
+
+    const boosterRoleId = process.env.BOOSTER_ROLE_ID;
+    const premiumRoleId = process.env.PREMIUM_ROLE_ID;
+
+    if (!boosterRoleId || !premiumRoleId) return;
+
+    const isBooster = member.roles.cache.has(boosterRoleId);
+
+    if (isBooster) {
+      try {
+        // Check if already has premium in DB
+        const existing = await getPremiumUser(member.id, guildId);
+        
+        if (!existing || !existing.isPremium) {
+          await member.roles.add(premiumRoleId);
+          await setPremiumUser(member.id, guildId, 'booster');
+          await setBoosterPremium(member.id, guildId, true);
+          
+          logger.info('Premium role added to booster on join', {
+            userId: member.id,
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to add premium role to booster on join', {
+          userId: member.id,
+          error: String(error),
+        });
+      }
+    }
+  }
+
+  private async assignPremiumToExistingBoosters(): Promise<void> {
+    const guildId = process.env.GUILD_ID;
+    if (!guildId) return;
+
+    const boosterRoleId = process.env.BOOSTER_ROLE_ID;
+    const premiumRoleId = process.env.PREMIUM_ROLE_ID;
+
+    if (!boosterRoleId || !premiumRoleId) return;
+
+    try {
+      const guild = this.client.guilds.cache.get(guildId);
+      if (!guild) return;
+
+      const members = await guild.members.fetch();
+      let count = 0;
+
+      for (const [, member] of members) {
+        if (member.roles.cache.has(boosterRoleId)) {
+          // Check if already in DB
+          const existing = await getPremiumUser(member.id, guildId);
+          
+          if (!existing || !existing.isPremium) {
+            try {
+              await member.roles.add(premiumRoleId);
+              await setPremiumUser(member.id, guildId, 'booster');
+              await setBoosterPremium(member.id, guildId, true);
+              count++;
+            } catch (error) {
+              logger.error('Failed to add premium role to existing booster', {
+                userId: member.id,
+                error: String(error),
+              });
+            }
+          }
+        }
+      }
+
+      if (count > 0) {
+        logger.info(`Added premium role to ${count} existing boosters`, {
+          component: 'BotManager',
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to assign premium to existing boosters', {
+        error: String(error),
       });
     }
   }
