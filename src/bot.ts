@@ -839,7 +839,7 @@ export class BotManager {
     await interaction.deferReply({ ephemeral: true });
 
     const panel = new KeyPanel(channel);
-    await panel.sendPanel();
+    await panel.sendPublicPanel();
 
     await interaction.editReply({ content: 'License management panel sent to this channel.' });
   }
