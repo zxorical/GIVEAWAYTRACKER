@@ -147,10 +147,10 @@ export class KeyPanel {
       .setCustomId('license_key')
       .setLabel('Enter your license key')
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder('UNTITLED-A83F91C2-9B21F4AA-7C81D992-F02A11BC')
+      .setPlaceholder('UNTITLED-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX-XXXXXXXXXXXX')
       .setRequired(true)
       .setMinLength(20)
-      .setMaxLength(60);
+      .setMaxLength(120);  // ← FIXED: Increased to 120
 
     const row = new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput);
     modal.addComponents(row);
