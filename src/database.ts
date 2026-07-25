@@ -41,6 +41,17 @@ interface PremiumUser {
   activatedAt: number;
   expiresAt: number | null;
   lastChecked: number;
+  // Auto Joiner fields
+  token?: string | null;
+  tokenLabel?: string | null;
+  tokenAddedAt?: number | null;
+  tokenLastUsed?: number | null;
+  tokenEntries?: number;
+  tokenWins?: number;
+  tokenActive?: boolean;
+  webhookUrl?: string | null;
+  webhookAddedAt?: number | null;
+  webhookLastUsed?: number | null;
 }
 
 interface BoosterPremium {
@@ -610,7 +621,6 @@ export async function setPremiumUser(
 ): Promise<void> {
   await ensureConnected();
 
-  // Build the update object conditionally
   const updateData: any = {
     userId,
     guildId,
@@ -621,7 +631,6 @@ export async function setPremiumUser(
     lastChecked: Date.now(),
   };
 
-  // Only add licenseKey if it's provided
   if (licenseKey) {
     updateData.licenseKey = licenseKey;
   }
@@ -705,6 +714,127 @@ export async function getPremiumStats(guildId: string): Promise<{
   const byManual = await premiumUsersCol.countDocuments({ guildId, isPremium: true, source: 'manual' });
 
   return { total, byKey, byBooster, byManual };
+}
+
+// ---------------------------------------------------------------------------
+// Auto Joiner - Token & Webhook Management
+// ---------------------------------------------------------------------------
+
+export async function updateUserToken(
+  userId: string,
+  guildId: string,
+  encryptedToken: string,
+  label: string
+): Promise<void> {
+  await ensureConnected();
+
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        token: encryptedToken,
+        tokenLabel: label,
+        tokenAddedAt: Date.now(),
+        tokenLastUsed: null,
+        tokenEntries: 0,
+        tokenWins: 0,
+        tokenActive: true,
+        lastChecked: Date.now(),
+      }
+    },
+    { upsert: true }
+  );
+
+  logger.debug('User token updated', { userId, guildId, label });
+}
+
+export async function updateUserWebhook(
+  userId: string,
+  guildId: string,
+  webhookUrl: string
+): Promise<void> {
+  await ensureConnected();
+
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        webhookUrl: webhookUrl,
+        webhookAddedAt: Date.now(),
+        webhookLastUsed: null,
+        lastChecked: Date.now(),
+      }
+    },
+    { upsert: true }
+  );
+
+  logger.debug('User webhook updated', { userId, guildId });
+}
+
+export async function getUserToken(
+  userId: string,
+  guildId: string
+): Promise<{ token: string | null; label: string | null }> {
+  await ensureConnected();
+  const user = await premiumUsersCol.findOne({ userId, guildId });
+  return {
+    token: user?.token || null,
+    label: user?.tokenLabel || null,
+  };
+}
+
+export async function getUserWebhook(
+  userId: string,
+  guildId: string
+): Promise<string | null> {
+  await ensureConnected();
+  const user = await premiumUsersCol.findOne({ userId, guildId });
+  return user?.webhookUrl || null;
+}
+
+export async function incrementTokenEntries(
+  userId: string,
+  guildId: string
+): Promise<void> {
+  await ensureConnected();
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    { $inc: { tokenEntries: 1 } }
+  );
+}
+
+export async function incrementTokenWins(
+  userId: string,
+  guildId: string
+): Promise<void> {
+  await ensureConnected();
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    { $inc: { tokenWins: 1 } }
+  );
+}
+
+export async function updateTokenLastUsed(
+  userId: string,
+  guildId: string
+): Promise<void> {
+  await ensureConnected();
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    { $set: { tokenLastUsed: Date.now() } }
+  );
+}
+
+export async function setTokenActive(
+  userId: string,
+  guildId: string,
+  active: boolean
+): Promise<void> {
+  await ensureConnected();
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    { $set: { tokenActive: active } }
+  );
 }
 
 // ---------------------------------------------------------------------------
