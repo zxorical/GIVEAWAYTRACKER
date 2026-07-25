@@ -31,6 +31,27 @@ interface TotalCounter {
   total: number;
 }
 
+// Premium User Tracking
+interface PremiumUser {
+  userId: string;
+  guildId: string;
+  isPremium: boolean;
+  source: 'key' | 'booster' | 'manual';
+  licenseKey?: string;
+  activatedAt: number;
+  expiresAt: number | null;
+  lastChecked: number;
+}
+
+interface BoosterPremium {
+  userId: string;
+  guildId: string;
+  isBooster: boolean;
+  premiumAssigned: boolean;
+  assignedAt: number;
+  lastChecked: number;
+}
+
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) {
   throw new Error('MONGO_URI environment variable is required');
@@ -44,6 +65,8 @@ let giveawaysCol: Collection<StoredGiveaway>;
 let countersCol: Collection<TotalCounter>;
 let watchlistCol: Collection<UserWatchlist>;
 let licenseKeysCol: Collection<LicenseKey>;
+let premiumUsersCol: Collection<PremiumUser>;
+let boosterPremiumCol: Collection<BoosterPremium>;
 
 let connected = false;
 let connectingPromise: Promise<void> | null = null;
@@ -73,6 +96,8 @@ async function connect(): Promise<void> {
       countersCol = db.collection<TotalCounter>('counters');
       watchlistCol = db.collection<UserWatchlist>('watchlists');
       licenseKeysCol = db.collection<LicenseKey>('license_keys');
+      premiumUsersCol = db.collection<PremiumUser>('premium_users');
+      boosterPremiumCol = db.collection<BoosterPremium>('booster_premium');
 
       await giveawaysCol.createIndex({ messageId: 1, channelId: 1 }, { unique: true });
       await giveawaysCol.createIndex({ status: 1 });
@@ -82,6 +107,12 @@ async function connect(): Promise<void> {
       await watchlistCol.createIndex({ items: 1 });
       await licenseKeysCol.createIndex({ key: 1 }, { unique: true });
       await licenseKeysCol.createIndex({ used: 1 });
+      await premiumUsersCol.createIndex({ userId: 1, guildId: 1 }, { unique: true });
+      await premiumUsersCol.createIndex({ isPremium: 1 });
+      await premiumUsersCol.createIndex({ source: 1 });
+      await boosterPremiumCol.createIndex({ userId: 1, guildId: 1 }, { unique: true });
+      await boosterPremiumCol.createIndex({ isBooster: 1 });
+      await boosterPremiumCol.createIndex({ premiumAssigned: 1 });
 
       const docs = await giveawaysCol.find({}).toArray();
       cache.clear();
@@ -565,4 +596,222 @@ export async function getLicenseStats(): Promise<{
   const total = await licenseKeysCol.countDocuments();
   const used = await licenseKeysCol.countDocuments({ used: true });
   return { total, used, unused: total - used };
+}
+
+// ---------------------------------------------------------------------------
+// Premium User Tracking
+// ---------------------------------------------------------------------------
+
+export async function setPremiumUser(
+  userId: string,
+  guildId: string,
+  source: 'key' | 'booster' | 'manual',
+  licenseKey?: string
+): Promise<void> {
+  await ensureConnected();
+
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        userId,
+        guildId,
+        isPremium: true,
+        source,
+        licenseKey: licenseKey || null,
+        activatedAt: Date.now(),
+        expiresAt: null,
+        lastChecked: Date.now(),
+      }
+    },
+    { upsert: true }
+  );
+
+  logger.debug('Premium user set', { userId, guildId, source });
+}
+
+export async function removePremiumUser(
+  userId: string,
+  guildId: string
+): Promise<void> {
+  await ensureConnected();
+
+  await premiumUsersCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        isPremium: false,
+        lastChecked: Date.now(),
+      }
+    }
+  );
+
+  logger.debug('Premium user removed', { userId, guildId });
+}
+
+export async function getPremiumUser(
+  userId: string,
+  guildId: string
+): Promise<PremiumUser | null> {
+  await ensureConnected();
+  return premiumUsersCol.findOne({ userId, guildId });
+}
+
+export async function isPremiumUser(
+  userId: string,
+  guildId: string
+): Promise<boolean> {
+  await ensureConnected();
+  const user = await premiumUsersCol.findOne({ userId, guildId, isPremium: true });
+  return !!user;
+}
+
+export async function getAllPremiumUsers(guildId: string): Promise<PremiumUser[]> {
+  await ensureConnected();
+  return premiumUsersCol.find({
+    guildId,
+    isPremium: true,
+  }).toArray();
+}
+
+export async function getPremiumUsersBySource(
+  guildId: string,
+  source: 'key' | 'booster' | 'manual'
+): Promise<PremiumUser[]> {
+  await ensureConnected();
+  return premiumUsersCol.find({
+    guildId,
+    isPremium: true,
+    source,
+  }).toArray();
+}
+
+export async function getPremiumStats(guildId: string): Promise<{
+  total: number;
+  byKey: number;
+  byBooster: number;
+  byManual: number;
+}> {
+  await ensureConnected();
+
+  const total = await premiumUsersCol.countDocuments({ guildId, isPremium: true });
+  const byKey = await premiumUsersCol.countDocuments({ guildId, isPremium: true, source: 'key' });
+  const byBooster = await premiumUsersCol.countDocuments({ guildId, isPremium: true, source: 'booster' });
+  const byManual = await premiumUsersCol.countDocuments({ guildId, isPremium: true, source: 'manual' });
+
+  return { total, byKey, byBooster, byManual };
+}
+
+// ---------------------------------------------------------------------------
+// Booster Premium Tracking
+// ---------------------------------------------------------------------------
+
+export async function setBoosterPremium(
+  userId: string,
+  guildId: string,
+  isBooster: boolean
+): Promise<void> {
+  await ensureConnected();
+
+  await boosterPremiumCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        userId,
+        guildId,
+        isBooster,
+        premiumAssigned: isBooster,
+        assignedAt: isBooster ? Date.now() : 0,
+        lastChecked: Date.now(),
+      }
+    },
+    { upsert: true }
+  );
+}
+
+export async function getBoosterPremium(
+  userId: string,
+  guildId: string
+): Promise<BoosterPremium | null> {
+  await ensureConnected();
+  return boosterPremiumCol.findOne({ userId, guildId });
+}
+
+export async function getActiveBoosters(guildId: string): Promise<BoosterPremium[]> {
+  await ensureConnected();
+  return boosterPremiumCol.find({
+    guildId,
+    isBooster: true,
+    premiumAssigned: true,
+  }).toArray();
+}
+
+export async function removeBoosterPremium(
+  userId: string,
+  guildId: string
+): Promise<void> {
+  await ensureConnected();
+  await boosterPremiumCol.updateOne(
+    { userId, guildId },
+    {
+      $set: {
+        isBooster: false,
+        premiumAssigned: false,
+        lastChecked: Date.now(),
+      }
+    }
+  );
+}
+
+export async function updateBoosterPremiumStatus(
+  userId: string,
+  guildId: string,
+  isBooster: boolean
+): Promise<{
+  shouldHavePremium: boolean;
+  currentStatus: boolean;
+}> {
+  await ensureConnected();
+
+  const record = await getBoosterPremium(userId, guildId);
+
+  if (!record) {
+    await setBoosterPremium(userId, guildId, isBooster);
+    return {
+      shouldHavePremium: isBooster,
+      currentStatus: false,
+    };
+  }
+
+  const shouldHavePremium = isBooster;
+
+  if (record.isBooster !== isBooster) {
+    await setBoosterPremium(userId, guildId, isBooster);
+  }
+
+  return {
+    shouldHavePremium,
+    currentStatus: record.premiumAssigned,
+  };
+}
+
+export async function getBoosterPremiumStats(guildId: string): Promise<{
+  total: number;
+  withPremium: number;
+  withoutPremium: number;
+}> {
+  await ensureConnected();
+
+  const total = await boosterPremiumCol.countDocuments({ guildId, isBooster: true });
+  const withPremium = await boosterPremiumCol.countDocuments({
+    guildId,
+    isBooster: true,
+    premiumAssigned: true,
+  });
+
+  return {
+    total,
+    withPremium,
+    withoutPremium: total - withPremium,
+  };
 }
