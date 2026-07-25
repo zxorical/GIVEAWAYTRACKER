@@ -52,8 +52,12 @@ import {
   getBoosterPremiumStats,
   getAllPremiumUsers,
   getPremiumStats,
+  getLicenseStats,
+  listLicenseKeys,
 } from './database.js';
 import { KeyPanel } from './license/keyPanel.js';
+import { PremiumPanel } from './premium/premiumPanel.js';
+import { AdminPanel } from './premium/adminPanel.js';
 import {
   isPremium,
   requirePremium,
@@ -404,8 +408,7 @@ export class BotManager {
     this.commands.set('watch', this.watchlistCommand.bind(this));
     this.commands.set('activate', this.activateCommand.bind(this));
     this.commands.set('premium', this.premiumCommand.bind(this));
-    this.commands.set('premiumpanel', this.premiumPanelCommand.bind(this));
-    this.commands.set('premiumadmin', this.premiumAdminCommand.bind(this));
+    this.commands.set('licenseadmin', this.licenseAdminCommand.bind(this));
 
     // --- Booster Listeners ---
     this.client.on('guildMemberUpdate', this.handleGuildMemberUpdate.bind(this));
@@ -420,6 +423,7 @@ export class BotManager {
       this.cleanupInterval = setInterval(() => this.purgeAndUpdatePresence(), 60_000);
       await this.registerCommands();
       await this.sendRolePanel();
+      await this.sendLicensePanel();
       await this.sendPremiumPanel();
 
       // Auto-assign premium to existing boosters on startup
@@ -429,29 +433,41 @@ export class BotManager {
     // --- Interaction Handler ---
     this.client.on('interactionCreate', async (interaction: Interaction) => {
       if (interaction.isButton()) {
+        // Role panel
         if (interaction.customId === 'toggle_ping') {
           await this.handlePingToggle(interaction);
           return;
         }
 
-        // Handle premium panel buttons (public and admin)
-        if (['activate_premium', 'check_premium', 'admin_generate_key', 'admin_list_keys', 'admin_refresh'].includes(interaction.customId)) {
+        // License panel (Activate Premium)
+        if (interaction.customId === 'license_activate') {
           const channel = interaction.channel as TextChannel;
           const panel = new KeyPanel(channel);
           await panel.handleInteraction(interaction);
           return;
         }
 
-        // Handle old panel buttons (for backward compatibility)
-        if (['generate_key', 'list_keys', 'refresh_stats'].includes(interaction.customId)) {
+        // Premium panel (AutoJoiner)
+        if (interaction.customId === 'premium_autojoiner') {
+          const channel = interaction.channel as TextChannel;
+          const panel = new PremiumPanel(channel);
+          await panel.handleInteraction(interaction);
+          return;
+        }
+
+        // Admin panel
+        if (['admin_generate_key', 'admin_list_keys', 'admin_refresh'].includes(interaction.customId)) {
           if (!isOwner(interaction.user.id)) {
-            await interaction.reply({ 
-              content: 'You do not have permission to use this panel.', 
-              ephemeral: true 
-            });
+            await interaction.reply({ content: 'No permission.', ephemeral: true });
             return;
           }
+          const panel = new AdminPanel();
+          await panel.handleInteraction(interaction);
+          return;
+        }
 
+        // Legacy buttons (backward compatibility)
+        if (['activate_premium', 'check_premium', 'generate_key', 'list_keys', 'refresh_stats'].includes(interaction.customId)) {
           const channel = interaction.channel as TextChannel;
           const panel = new KeyPanel(channel);
           await panel.handleInteraction(interaction);
@@ -461,6 +477,23 @@ export class BotManager {
       }
 
       if (interaction.isModalSubmit()) {
+        // License activation modal
+        if (interaction.customId === 'license_activate_modal') {
+          const channel = interaction.channel as TextChannel;
+          const panel = new KeyPanel(channel);
+          await panel.handleModalSubmit(interaction);
+          return;
+        }
+
+        // Premium panel modal (AutoJoiner)
+        if (interaction.customId === 'premium_autojoiner_modal') {
+          const channel = interaction.channel as TextChannel;
+          const panel = new PremiumPanel(channel);
+          await panel.handleModalSubmit(interaction);
+          return;
+        }
+
+        // Legacy activation modal
         if (interaction.customId === 'activate_premium_modal') {
           const channel = interaction.channel as TextChannel;
           const panel = new KeyPanel(channel);
@@ -863,7 +896,7 @@ export class BotManager {
     await interaction.deferReply({ ephemeral: true });
 
     const panel = new KeyPanel(channel);
-    await panel.sendPublicPanel();
+    await panel.sendPanel();
 
     await interaction.editReply({ content: 'License management panel sent to this channel.' });
   }
@@ -873,7 +906,6 @@ export class BotManager {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // Validate and use the key
     const result = await useLicenseKey(key, interaction.user.id);
 
     if (!result.success) {
@@ -883,7 +915,6 @@ export class BotManager {
       return;
     }
 
-    // Assign the premium role
     const guildId = interaction.guildId;
     if (!guildId) {
       await interaction.editReply({
@@ -902,7 +933,7 @@ export class BotManager {
     }
 
     await interaction.editReply({
-      content: 'Premium activated successfully. You now have access to premium features.',
+      content: 'Premium activated successfully.',
     });
   }
 
@@ -916,7 +947,7 @@ export class BotManager {
         content: [
           'You do not have premium access.',
           '',
-          'To activate premium, use: `/activate <key>` or boost the server.',
+          'To activate premium, click the "Activate Premium" button in the license panel.',
           'Contact an administrator to obtain a license key.',
         ].join('\n'),
       });
@@ -928,68 +959,13 @@ export class BotManager {
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Premium Panel Commands (Manual resend)
-  // -------------------------------------------------------------------------
-
-  private async premiumPanelCommand(interaction: ChatInputCommandInteraction<CacheType>) {
-    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
-    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
-    
-    if (!channel) {
-      await interaction.reply({ 
-        content: `Premium panel channel not found. Channel ID: ${panelChannelId}. Please set PREMIUM_PANEL_CHANNEL_ID in .env`, 
-        ephemeral: true 
-      });
-      return;
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      const panel = new KeyPanel(channel);
-      await panel.sendPublicPanel();
-
-      await interaction.editReply({ 
-        content: `✅ Premium activation panel sent to <#${panelChannelId}>.` 
-      });
-    } catch (error) {
-      logger.error('Failed to send premium panel', { error: formatError(error) });
-      await interaction.editReply({ 
-        content: `❌ Failed to send panel: ${formatError(error)}` 
-      });
-    }
-  }
-
-  private async premiumAdminCommand(interaction: ChatInputCommandInteraction<CacheType>) {
+  private async licenseAdminCommand(interaction: ChatInputCommandInteraction<CacheType>) {
     if (!await requireOwner(interaction)) return;
 
-    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
-    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
-    
-    if (!channel) {
-      await interaction.reply({ 
-        content: `Premium panel channel not found. Channel ID: ${panelChannelId}. Please set PREMIUM_PANEL_CHANNEL_ID in .env`, 
-        ephemeral: true 
-      });
-      return;
-    }
-
     await interaction.deferReply({ ephemeral: true });
 
-    try {
-      const panel = new KeyPanel(channel);
-      await panel.sendAdminPanel(interaction);
-
-      await interaction.editReply({ 
-        content: `✅ Admin panel sent to <#${panelChannelId}>.` 
-      });
-    } catch (error) {
-      logger.error('Failed to send admin panel', { error: formatError(error) });
-      await interaction.editReply({ 
-        content: `❌ Failed to send admin panel: ${formatError(error)}` 
-      });
-    }
+    const panel = new AdminPanel();
+    await panel.sendPanel(interaction);
   }
 
   // -------------------------------------------------------------------------
@@ -1127,8 +1103,7 @@ export class BotManager {
         { name: '/panel', value: 'Send license management panel (owner)', inline: false },
         { name: '/activate <key>', value: 'Activate premium license', inline: false },
         { name: '/premium', value: 'Check premium status', inline: false },
-        { name: '/premiumpanel', value: 'Resend premium activation panel to channel', inline: false },
-        { name: '/premiumadmin', value: 'Send admin license management panel (owner)', inline: false },
+        { name: '/licenseadmin', value: 'Send admin license management panel (owner)', inline: false },
         { name: '/watch add <item>', value: 'Track giveaway items', inline: false },
         { name: '/watch remove <item>', value: 'Stop tracking item', inline: false },
         { name: '/watch list', value: 'Show tracked items', inline: false },
@@ -1188,42 +1163,78 @@ export class BotManager {
   }
 
   // -------------------------------------------------------------------------
-  // Premium Panel (Auto-sends on startup like role panel)
+  // License Panel (Auto-sends on startup)
   // -------------------------------------------------------------------------
 
-  private async sendPremiumPanel(): Promise<void> {
-    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID || CONFIG.trackerChannelId;
+  private async sendLicensePanel(): Promise<void> {
+    const panelChannelId = process.env.LICENSE_PANEL_CHANNEL_ID;
+    if (!panelChannelId) {
+      logger.warn('LICENSE_PANEL_CHANNEL_ID not set', { component: 'BotManager' });
+      return;
+    }
+
     const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
-    
     if (!channel) {
-      logger.warn('Premium panel channel not found. Please set PREMIUM_PANEL_CHANNEL_ID in .env', {
+      logger.warn('License panel channel not found', { 
         component: 'BotManager',
+        channelId: panelChannelId 
       });
       return;
     }
 
     try {
-      // Delete old panel if exists (like the role panel does)
       const messages = await channel.messages.fetch({ limit: 20 });
       const oldPanel = messages.find(m =>
         m.author.id === this.client.user?.id &&
         m.embeds.length > 0 &&
-        m.embeds[0]?.title === 'Premium Access'
+        m.embeds[0]?.title === 'Premium License'
       );
       if (oldPanel) await oldPanel.delete().catch(() => {});
 
       const panel = new KeyPanel(channel);
-      await panel.sendPublicPanel();
+      await panel.sendPanel();
 
-      logger.info('Premium panel sent to channel', { 
+      logger.info('License panel sent', { channelId: panelChannelId });
+    } catch (error) {
+      logger.error('Failed to send license panel', { error: formatError(error) });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Premium Panel (Auto-sends on startup)
+  // -------------------------------------------------------------------------
+
+  private async sendPremiumPanel(): Promise<void> {
+    const panelChannelId = process.env.PREMIUM_PANEL_CHANNEL_ID;
+    if (!panelChannelId) {
+      logger.warn('PREMIUM_PANEL_CHANNEL_ID not set', { component: 'BotManager' });
+      return;
+    }
+
+    const channel = this.client.channels.cache.get(panelChannelId) as TextChannel | undefined;
+    if (!channel) {
+      logger.warn('Premium panel channel not found', { 
         component: 'BotManager',
         channelId: panelChannelId 
       });
+      return;
+    }
+
+    try {
+      const messages = await channel.messages.fetch({ limit: 20 });
+      const oldPanel = messages.find(m =>
+        m.author.id === this.client.user?.id &&
+        m.embeds.length > 0 &&
+        m.embeds[0]?.title === 'Premium Panel'
+      );
+      if (oldPanel) await oldPanel.delete().catch(() => {});
+
+      const panel = new PremiumPanel(channel);
+      await panel.sendPanel();
+
+      logger.info('Premium panel sent', { channelId: panelChannelId });
     } catch (error) {
-      logger.error('Failed to send premium panel', { 
-        component: 'BotManager',
-        error: formatError(error) 
-      });
+      logger.error('Failed to send premium panel', { error: formatError(error) });
     }
   }
 
@@ -1249,19 +1260,12 @@ export class BotManager {
     const hadBooster = oldRoles.has(boosterRoleId);
     const hasBooster = newRoles.has(boosterRoleId);
 
-    // User just boosted - add premium
     if (!hadBooster && hasBooster) {
       try {
-        // Add premium role
         await newMember.roles.add(premiumRoleId);
-        
-        // Update database
         await setPremiumUser(newMember.id, guildId, 'booster');
         await setBoosterPremium(newMember.id, guildId, true);
-        
-        logger.info('Premium role added to booster', {
-          userId: newMember.id,
-        });
+        logger.info('Premium role added to booster', { userId: newMember.id });
       } catch (error) {
         logger.error('Failed to add premium role to booster', {
           userId: newMember.id,
@@ -1271,19 +1275,12 @@ export class BotManager {
       return;
     }
 
-    // User just unboosted - remove premium
     if (hadBooster && !hasBooster) {
       try {
-        // Remove premium role
         await newMember.roles.remove(premiumRoleId);
-        
-        // Update database
         await removePremiumUser(newMember.id, guildId);
         await removeBoosterPremium(newMember.id, guildId);
-        
-        logger.info('Premium role removed from unbooster', {
-          userId: newMember.id,
-        });
+        logger.info('Premium role removed from unbooster', { userId: newMember.id });
       } catch (error) {
         logger.error('Failed to remove premium role from unbooster', {
           userId: newMember.id,
@@ -1308,17 +1305,12 @@ export class BotManager {
 
     if (isBooster) {
       try {
-        // Check if already has premium in DB
         const existing = await getPremiumUser(member.id, guildId);
-        
         if (!existing || !existing.isPremium) {
           await member.roles.add(premiumRoleId);
           await setPremiumUser(member.id, guildId, 'booster');
           await setBoosterPremium(member.id, guildId, true);
-          
-          logger.info('Premium role added to booster on join', {
-            userId: member.id,
-          });
+          logger.info('Premium role added to booster on join', { userId: member.id });
         }
       } catch (error) {
         logger.error('Failed to add premium role to booster on join', {
@@ -1347,9 +1339,7 @@ export class BotManager {
 
       for (const [, member] of members) {
         if (member.roles.cache.has(boosterRoleId)) {
-          // Check if already in DB
           const existing = await getPremiumUser(member.id, guildId);
-          
           if (!existing || !existing.isPremium) {
             try {
               await member.roles.add(premiumRoleId);
@@ -1519,10 +1509,7 @@ export class BotManager {
         .setName('premium')
         .setDescription('Check your premium status'),
       new SlashCommandBuilder()
-        .setName('premiumpanel')
-        .setDescription('Resend premium activation panel to configured channel'),
-      new SlashCommandBuilder()
-        .setName('premiumadmin')
+        .setName('licenseadmin')
         .setDescription('Send admin license management panel (owner only)')
         .setDefaultMemberPermissions(0),
     ];
