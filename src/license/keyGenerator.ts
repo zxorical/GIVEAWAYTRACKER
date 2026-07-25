@@ -9,7 +9,7 @@ import { logger } from '../logger.js';
 
 const CONFIG = {
   PREFIX: 'UNTITLED',
-  SEGMENTS: 6,
+  SEGMENTS: 7,
   BYTES_PER_SEGMENT: 6,
   MAX_ATTEMPTS: 10
 };
