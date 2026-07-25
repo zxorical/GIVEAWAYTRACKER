@@ -62,12 +62,19 @@ export class PremiumPanel {
     logger.debug('Premium panel sent', { channelId: this.channel.id });
   }
 
+  /**
+   * showModal() must be the FIRST response and must fire within ~3s.
+   * The old version called isPremium() (live Discord API call) and
+   * getPremiumUser() (Mongo read) BEFORE showModal() — either one
+   * occasionally taking >3s is exactly what caused the infinite
+   * loading. Now we show the modal instantly with no pre-checks,
+   * and do the premium check + DB work in handleModalSubmit, where
+   * deferReply() already buys 15 minutes instead of 3 seconds.
+   */
   async handleInteraction(interaction: ButtonInteraction): Promise<void> {
     if (interaction.customId !== 'premium_autojoiner') return;
 
-    // Get guild ID first - fast check
-    const guildId = interaction.guildId;
-    if (!guildId) {
+    if (!interaction.guildId) {
       await interaction.reply({
         content: 'This must be used in a server.',
         ephemeral: true,
@@ -75,23 +82,6 @@ export class PremiumPanel {
       return;
     }
 
-    // Check if user has premium - this is the slow part
-    // But we need to do it BEFORE showing the modal
-    const hasPremium = await isPremium(interaction.user.id, guildId);
-    if (!hasPremium) {
-      await interaction.reply({
-        content: 'Premium access required to use AutoJoiner. Activate premium first.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // Get existing values - another DB call
-    const user = await getPremiumUser(interaction.user.id, guildId);
-    const existingToken = user?.token || '';
-    const existingWebhook = user?.webhookUrl || '';
-
-    // Build modal
     const modal = new ModalBuilder()
       .setCustomId('premium_autojoiner_modal')
       .setTitle('AutoJoiner Settings');
@@ -103,8 +93,7 @@ export class PremiumPanel {
       .setPlaceholder('Paste your Discord token here')
       .setRequired(true)
       .setMinLength(50)
-      .setMaxLength(200)
-      .setValue(existingToken ? '••••••••••••••••' : '');
+      .setMaxLength(200);
 
     const webhookInput = new TextInputBuilder()
       .setCustomId('webhook_url')
@@ -113,15 +102,14 @@ export class PremiumPanel {
       .setPlaceholder('https://discord.com/api/webhooks/...')
       .setRequired(false)
       .setMinLength(0)
-      .setMaxLength(200)
-      .setValue(existingWebhook || '');
+      .setMaxLength(200);
 
     const row1 = new ActionRowBuilder<TextInputBuilder>().addComponents(tokenInput);
     const row2 = new ActionRowBuilder<TextInputBuilder>().addComponents(webhookInput);
 
     modal.addComponents(row1, row2);
 
-    // Show the modal - must be called within 3 seconds of interaction
+    // Fires instantly — no async work before this line.
     await interaction.showModal(modal);
   }
 
@@ -132,9 +120,6 @@ export class PremiumPanel {
 
     await interaction.deferReply({ ephemeral: true });
 
-    const token = interaction.fields.getTextInputValue('discord_token').trim();
-    const webhookUrl = interaction.fields.getTextInputValue('webhook_url').trim();
-
     const guildId = interaction.guildId;
     if (!guildId) {
       await interaction.editReply({
@@ -143,9 +128,19 @@ export class PremiumPanel {
       return;
     }
 
+    const hasPremium = await isPremium(interaction.user.id, guildId);
+    if (!hasPremium) {
+      await interaction.editReply({
+        content: 'Premium access required to use AutoJoiner. Activate premium first.',
+      });
+      return;
+    }
+
+    const token = interaction.fields.getTextInputValue('discord_token').trim();
+    const webhookUrl = interaction.fields.getTextInputValue('webhook_url').trim();
+
     try {
-      // Validate token (if provided and not masked)
-      if (token && token !== '••••••••••••••••') {
+      if (token) {
         const isValid = await validateDiscordToken(token);
         if (!isValid) {
           await interaction.editReply({
@@ -156,12 +151,9 @@ export class PremiumPanel {
 
         const encryptedToken = encryptToken(token);
         await updateUserToken(interaction.user.id, guildId, encryptedToken, 'main');
-
-        // Start token session
         startTokenSession(interaction.user.id, guildId, token, 'main');
       }
 
-      // Validate webhook format (if provided)
       if (webhookUrl) {
         if (!webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
           await interaction.editReply({
@@ -172,13 +164,12 @@ export class PremiumPanel {
         await updateUserWebhook(interaction.user.id, guildId, webhookUrl);
       }
 
-      // Ensure user is marked as premium
       await setPremiumUser(interaction.user.id, guildId, 'manual');
 
       logger.info('AutoJoiner settings updated', {
         userId: interaction.user.id,
         guildId,
-        hasToken: !!token && token !== '••••••••••••••••',
+        hasToken: !!token,
         hasWebhook: !!webhookUrl,
       });
 
