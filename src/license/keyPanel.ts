@@ -1,6 +1,6 @@
 /**
  * @module keyPanel
- * Public Discord panel for premium activation (like the role ping panel)
+ * Public Discord panel for premium activation
  */
 
 import {
@@ -30,26 +30,18 @@ export class KeyPanel {
   constructor(private channel: TextChannel) {}
 
   // ============================================================================
-  // PUBLIC PANEL - Like the role ping panel, everyone can see and use it
+  // PUBLIC PANEL - Clean, minimal, no stats
   // ============================================================================
 
   async sendPublicPanel(): Promise<void> {
-    // Delete old panel if exists
     if (this.panelMessage) {
       try { await this.panelMessage.delete(); } catch {}
     }
 
-    const stats = await getLicenseStats();
-
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
       .setTitle('Premium Access')
-      .setDescription([
-        'Click the button below to activate premium access with your license key.',
-        '',
-        `**Keys Available:** ${stats.unused}`,
-      ].join('\n'))
-      .setFooter({ text: 'Click the button to enter your key' });
+      .setDescription('Click the button below to activate premium with your license key.');
 
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(
@@ -68,35 +60,22 @@ export class KeyPanel {
       components: [row],
     });
 
-    logger.debug('Public premium panel sent to channel', { channelId: this.channel.id });
+    logger.debug('Public premium panel sent', { channelId: this.channel.id });
   }
 
   // ============================================================================
-  // ADMIN PANEL - Ephemeral (only visible to admin)
+  // ADMIN PANEL - Only admin sees stats
   // ============================================================================
 
   async sendAdminPanel(interaction: ChatInputCommandInteraction<CacheType>): Promise<void> {
     const stats = await getLicenseStats();
-    const keys = await listLicenseKeys(10);
 
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
-      .setTitle('Admin - License Management')
+      .setTitle('License Admin')
       .setDescription([
-        'Generate and manage license keys.',
-        '',
-        '**Statistics**',
-        `Total Keys: ${stats.total}`,
-        `Used: ${stats.used}`,
-        `Available: ${stats.unused}`,
-        '',
-        '**Recent Keys**',
-        keys.length > 0 ? keys.slice(0, 5).map(k => {
-          const status = k.used ? `Used by <@${k.usedBy}>` : 'Available';
-          return `\`${k.key}\` - ${status}`;
-        }).join('\n') : 'No keys generated yet.',
-      ].join('\n'))
-      .setTimestamp();
+        `Total: ${stats.total} | Available: ${stats.unused} | Used: ${stats.used}`,
+      ].join('\n'));
 
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(
@@ -106,7 +85,7 @@ export class KeyPanel {
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
           .setCustomId('admin_list_keys')
-          .setLabel('List All Keys')
+          .setLabel('List Keys')
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId('admin_refresh')
@@ -238,7 +217,7 @@ export class KeyPanel {
     }
 
     await interaction.editReply({
-      content: 'Premium activated successfully. You now have access to premium features.',
+      content: 'Premium activated successfully.',
     });
   }
 
@@ -261,12 +240,7 @@ export class KeyPanel {
 
     if (!premium) {
       await interaction.editReply({
-        content: [
-          'You do not have premium access.',
-          '',
-          'Click the "Activate Premium" button to enter your license key.',
-          'Contact an administrator to obtain a license key.',
-        ].join('\n'),
+        content: 'You do not have premium access. Click "Activate Premium" to enter your key.',
       });
       return;
     }
@@ -287,13 +261,12 @@ export class KeyPanel {
 
     const embed = new EmbedBuilder()
       .setColor(0x00AAFF)
-      .setTitle('License Key Generated')
+      .setTitle('Key Generated')
       .addFields(
         { name: 'Key', value: `\`${key}\``, inline: false },
         { name: 'Type', value: 'Single-use', inline: true },
-        { name: 'Expiration', value: 'Never', inline: true },
-      )
-      .setTimestamp();
+        { name: 'Expires', value: 'Never', inline: true },
+      );
 
     await interaction.editReply({ embeds: [embed] });
 
@@ -309,14 +282,13 @@ export class KeyPanel {
     const keys = await listLicenseKeys(50);
 
     if (keys.length === 0) {
-      await interaction.editReply({ content: 'No license keys have been generated.' });
+      await interaction.editReply({ content: 'No keys generated.' });
       return;
     }
 
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
-      .setTitle(`All License Keys (${keys.length})`)
-      .setTimestamp();
+      .setTitle(`Keys (${keys.length})`);
 
     for (const k of keys.slice(0, 20)) {
       const status = k.used 
@@ -325,13 +297,13 @@ export class KeyPanel {
       
       embed.addFields({
         name: `\`${k.key}\``,
-        value: `${status} | Created ${formatTimestamp(k.createdAt)}`,
+        value: `${status} | ${formatTimestamp(k.createdAt)}`,
         inline: false,
       });
     }
 
     if (keys.length > 20) {
-      embed.setFooter({ text: `Showing 20 of ${keys.length} keys` });
+      embed.setFooter({ text: `Showing 20 of ${keys.length}` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -339,49 +311,6 @@ export class KeyPanel {
 
   private async handleAdminRefresh(interaction: ButtonInteraction): Promise<void> {
     await interaction.deferReply({ ephemeral: true });
-    
-    // Re-send the admin panel
-    const stats = await getLicenseStats();
-    const keys = await listLicenseKeys(10);
-
-    const embed = new EmbedBuilder()
-      .setColor(0x5865F2)
-      .setTitle('Admin - License Management')
-      .setDescription([
-        'Generate and manage license keys.',
-        '',
-        '**Statistics**',
-        `Total Keys: ${stats.total}`,
-        `Used: ${stats.used}`,
-        `Available: ${stats.unused}`,
-        '',
-        '**Recent Keys**',
-        keys.length > 0 ? keys.slice(0, 5).map(k => {
-          const status = k.used ? `Used by <@${k.usedBy}>` : 'Available';
-          return `\`${k.key}\` - ${status}`;
-        }).join('\n') : 'No keys generated yet.',
-      ].join('\n'))
-      .setTimestamp();
-
-    const row = new ActionRowBuilder<ButtonBuilder>()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId('admin_generate_key')
-          .setLabel('Generate Key')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('admin_list_keys')
-          .setLabel('List All Keys')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId('admin_refresh')
-          .setLabel('Refresh')
-          .setStyle(ButtonStyle.Secondary),
-      );
-
-    await interaction.editReply({
-      embeds: [embed],
-      components: [row],
-    });
+    await this.sendAdminPanel(interaction as any);
   }
 }
