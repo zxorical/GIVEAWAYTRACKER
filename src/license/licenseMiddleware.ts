@@ -5,6 +5,14 @@
 
 import { Client } from 'discord.js';
 import { logger } from '../logger.js';
+import {
+  isPremiumUser,
+  setPremiumUser,
+  removePremiumUser as removePremiumUserDb,
+  getPremiumUser,
+  getAllPremiumUsers,
+  getPremiumStats as getPremiumStatsDb,
+} from '../database.js';
 
 // ============================================================================
 // State
@@ -18,6 +26,7 @@ interface CacheEntry {
   isPremium: boolean;
   expiresAt: number;
   guildId?: string;
+  source?: string;
 }
 
 const premiumCache = new Map<string, CacheEntry>();
@@ -126,6 +135,101 @@ export async function isPremium(userId: string, guildId?: string): Promise<boole
   }
 }
 
+export async function checkPremium(
+  userId: string,
+  guildId?: string
+): Promise<{
+  isPremium: boolean;
+  guildId?: string;
+  roleId?: string;
+  source?: string;
+  error?: string;
+}> {
+  if (!guildId) {
+    return { isPremium: false, error: 'Guild ID required.' };
+  }
+
+  if (!clientRef) {
+    return { isPremium: false, error: 'Bot client not initialized.' };
+  }
+
+  if (!roleId) {
+    return { isPremium: false, error: 'Premium role not configured.' };
+  }
+
+  // Check cache first
+  const cacheKey = `${userId}:${guildId}`;
+  const cached = premiumCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return {
+      isPremium: cached.isPremium,
+      guildId: cached.guildId,
+      roleId,
+      source: cached.source,
+    };
+  }
+
+  try {
+    // Check database
+    const dbUser = await getPremiumUser(userId, guildId);
+    const dbPremium = dbUser?.isPremium || false;
+
+    // Check Discord role
+    let hasRole = false;
+    const guild = clientRef.guilds.cache.get(guildId);
+    if (guild) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        hasRole = member.roles.cache.has(roleId);
+      }
+    }
+
+    const isPremiumResult = dbPremium || hasRole;
+    const source = dbUser?.source || (hasRole ? 'manual' : undefined);
+
+    // Sync if needed
+    if (hasRole && !dbPremium) {
+      await setPremiumUser(userId, guildId, 'manual');
+    }
+
+    if (dbPremium && !hasRole && guild) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        await member.roles.add(roleId).catch(() => {});
+      }
+    }
+
+    // Cache the result
+    premiumCache.set(cacheKey, {
+      isPremium: isPremiumResult,
+      expiresAt: Date.now() + CACHE_TTL,
+      guildId,
+      source,
+    });
+
+    return {
+      isPremium: isPremiumResult,
+      guildId,
+      roleId,
+      source,
+    };
+  } catch (error) {
+    return {
+      isPremium: false,
+      error: String(error),
+    };
+  }
+}
+
+export async function isPremiumFresh(
+  userId: string,
+  guildId?: string
+): Promise<boolean> {
+  clearPremiumCache(userId);
+  return isPremium(userId, guildId);
+}
+
 export async function requirePremium(userId: string, guildId?: string): Promise<{
   allowed: boolean;
   message?: string;
@@ -143,10 +247,60 @@ export async function requirePremium(userId: string, guildId?: string): Promise<
 }
 
 // ============================================================================
-// Role Management
+// Premium Management
 // ============================================================================
 
-export async function assignPremiumRole(
+export async function addPremiumUser(
+  userId: string,
+  guildId: string,
+  source: 'key' | 'booster' | 'manual',
+  licenseKey?: string
+): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  if (!clientRef) {
+    return { success: false, error: 'Bot client not initialized.' };
+  }
+
+  if (!roleId) {
+    return { success: false, error: 'PREMIUM_ROLE_ID not configured.' };
+  }
+
+  try {
+    const guild = clientRef.guilds.cache.get(guildId);
+    if (!guild) {
+      return { success: false, error: 'Guild not found.' };
+    }
+
+    const role = guild.roles.cache.get(roleId);
+    if (!role) {
+      return { success: false, error: 'Premium role not found.' };
+    }
+
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member) {
+      return { success: false, error: 'User not found in this server.' };
+    }
+
+    // Add role
+    if (!member.roles.cache.has(roleId)) {
+      await member.roles.add(role);
+    }
+
+    // Add to database
+    await setPremiumUser(userId, guildId, source, licenseKey);
+    clearPremiumCache(userId);
+
+    logger.info('Premium user added', { userId, guildId, source });
+    return { success: true };
+  } catch (error) {
+    logger.error('Failed to add premium user', { userId, guildId, error: String(error) });
+    return { success: false, error: String(error) };
+  }
+}
+
+export async function removePremiumUser(
   userId: string,
   guildId: string
 ): Promise<{
@@ -169,34 +323,46 @@ export async function assignPremiumRole(
 
     const role = guild.roles.cache.get(roleId);
     if (!role) {
-      return { success: false, error: 'Premium role not found. Please contact an administrator.' };
+      return { success: false, error: 'Premium role not found.' };
     }
 
     const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) {
-      return { success: false, error: 'User not found in this server.' };
+    if (member) {
+      if (member.roles.cache.has(roleId)) {
+        await member.roles.remove(role);
+      }
     }
 
-    if (member.roles.cache.has(roleId)) {
-      return { success: false, error: 'You already have premium access.' };
-    }
-
-    await member.roles.add(role);
+    // Remove from database
+    await removePremiumUserDb(userId, guildId);
     clearPremiumCache(userId);
 
-    logger.info('Premium role assigned', {
-      userId,
-      guildId,
-      roleId,
-    });
-
+    logger.info('Premium user removed', { userId, guildId });
     return { success: true };
   } catch (error) {
-    logger.error('Failed to assign premium role', {
-      userId,
-      guildId,
-      error: String(error),
-    });
-    return { success: false, error: 'Failed to assign premium role. Please contact an administrator.' };
+    logger.error('Failed to remove premium user', { userId, guildId, error: String(error) });
+    return { success: false, error: String(error) };
   }
+}
+
+export async function getPremiumUsers(guildId: string): Promise<any[]> {
+  return getAllPremiumUsers(guildId);
+}
+
+export async function getPremiumStats(guildId: string): Promise<any> {
+  return getPremiumStatsDb(guildId);
+}
+
+// ============================================================================
+// Role Management (Legacy - use addPremiumUser instead)
+// ============================================================================
+
+export async function assignPremiumRole(
+  userId: string,
+  guildId: string
+): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  return addPremiumUser(userId, guildId, 'key');
 }
