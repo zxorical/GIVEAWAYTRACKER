@@ -1,8 +1,3 @@
-/**
- * @module autoJoinerPanel
- * Auto Joiner panel - Add token, webhook, and check status
- */
-
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -21,21 +16,15 @@ import {
   setPremiumUser,
   updateUserToken,
   updateUserWebhook,
-  getUserToken,
-  getUserWebhook,
 } from '../database.js';
-import { isPremium } from './licenseMiddleware.js';
-import { encryptToken, decryptToken, validateDiscordToken } from './tokenManager.js';
+import { isPremium } from '../license/licenseMiddleware.js';
+import { encryptToken, validateDiscordToken } from './tokenManager.js';
 import { logger } from '../logger.js';
 
-export class AutoJoinerPanel {
+export class PremiumPanel {
   private panelMessage: Message | null = null;
 
   constructor(private channel: TextChannel) {}
-
-  // ============================================================================
-  // PUBLIC PANEL - Auto Joiner
-  // ============================================================================
 
   async sendPanel(): Promise<void> {
     if (this.panelMessage) {
@@ -44,23 +33,15 @@ export class AutoJoinerPanel {
 
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
-      .setTitle('Auto Joiner')
-      .setDescription('Click the buttons below to start.');
+      .setTitle('Premium Panel')
+      .setDescription('Configure your AutoJoiner settings.');
 
     const row = new ActionRowBuilder<ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
-          .setCustomId('autojoiner_add_token')
-          .setLabel('Add Token')
+          .setCustomId('premium_autojoiner')
+          .setLabel('AutoJoiner')
           .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('autojoiner_add_webhook')
-          .setLabel('Add Webhook')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId('autojoiner_status')
-          .setLabel('Status')
-          .setStyle(ButtonStyle.Secondary),
       );
 
     this.panelMessage = await this.channel.send({
@@ -68,38 +49,16 @@ export class AutoJoinerPanel {
       components: [row],
     });
 
-    logger.debug('Auto Joiner panel sent', { channelId: this.channel.id });
+    logger.debug('Premium panel sent', { channelId: this.channel.id });
   }
-
-  // ============================================================================
-  // Button Interaction Handler
-  // ============================================================================
 
   async handleInteraction(interaction: ButtonInteraction): Promise<void> {
-    const { customId } = interaction;
-
-    if (customId === 'autojoiner_add_token') {
-      await this.showAddTokenModal(interaction);
-      return;
-    }
-
-    if (customId === 'autojoiner_add_webhook') {
-      await this.showAddWebhookModal(interaction);
-      return;
-    }
-
-    if (customId === 'autojoiner_status') {
-      await this.handleStatus(interaction);
-      return;
+    if (interaction.customId === 'premium_autojoiner') {
+      await this.showAutoJoinerModal(interaction);
     }
   }
 
-  // ============================================================================
-  // Add Token Modal
-  // ============================================================================
-
-  private async showAddTokenModal(interaction: ButtonInteraction): Promise<void> {
-    // Check if user has premium
+  private async showAutoJoinerModal(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId;
     if (!guildId) {
       await interaction.reply({
@@ -112,143 +71,57 @@ export class AutoJoinerPanel {
     const hasPremium = await isPremium(interaction.user.id, guildId);
     if (!hasPremium) {
       await interaction.reply({
-        content: 'Premium access required to use Auto Joiner. Activate premium first.',
+        content: 'Premium access required to use AutoJoiner. Activate premium first.',
         ephemeral: true,
       });
       return;
     }
 
+    // Get existing values
+    const user = await getPremiumUser(interaction.user.id, guildId);
+    const existingToken = user?.token || '';
+    const existingWebhook = user?.webhookUrl || '';
+
     const modal = new ModalBuilder()
-      .setCustomId('autojoiner_token_modal')
-      .setTitle('Add Discord Token');
+      .setCustomId('premium_autojoiner_modal')
+      .setTitle('AutoJoiner Settings');
 
     const tokenInput = new TextInputBuilder()
       .setCustomId('discord_token')
-      .setLabel('Enter your Discord token')
+      .setLabel('Discord Token')
       .setStyle(TextInputStyle.Paragraph)
       .setPlaceholder('Paste your Discord token here')
       .setRequired(true)
       .setMinLength(50)
-      .setMaxLength(200);
+      .setMaxLength(200)
+      .setValue(existingToken ? '••••••••••••••••' : '');
 
-    const labelInput = new TextInputBuilder()
-      .setCustomId('token_label')
-      .setLabel('Label (optional)')
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder('e.g., main, alt')
+    const webhookInput = new TextInputBuilder()
+      .setCustomId('webhook_url')
+      .setLabel('Webhook (optional)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('https://discord.com/api/webhooks/...')
       .setRequired(false)
-      .setMaxLength(20);
+      .setMinLength(0)
+      .setMaxLength(200)
+      .setValue(existingWebhook || '');
 
     const row1 = new ActionRowBuilder<TextInputBuilder>().addComponents(tokenInput);
-    const row2 = new ActionRowBuilder<TextInputBuilder>().addComponents(labelInput);
+    const row2 = new ActionRowBuilder<TextInputBuilder>().addComponents(webhookInput);
 
     modal.addComponents(row1, row2);
 
     await interaction.showModal(modal);
   }
 
-  async handleTokenModal(interaction: ModalSubmitInteraction): Promise<void> {
-    if (interaction.customId !== 'autojoiner_token_modal') {
+  async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (interaction.customId !== 'premium_autojoiner_modal') {
       return;
     }
 
     await interaction.deferReply({ ephemeral: true });
 
     const token = interaction.fields.getTextInputValue('discord_token').trim();
-    const label = interaction.fields.getTextInputValue('token_label').trim() || 'main';
-
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.editReply({
-        content: 'This must be used in a server.',
-      });
-      return;
-    }
-
-    try {
-      // Validate token
-      const isValid = await validateDiscordToken(token);
-      if (!isValid) {
-        await interaction.editReply({
-          content: 'Invalid Discord token. Please check and try again.',
-        });
-        return;
-      }
-
-      // Encrypt and store token
-      const encryptedToken = encryptToken(token);
-      await setPremiumUser(interaction.user.id, guildId, 'manual');
-      await updateUserToken(interaction.user.id, guildId, encryptedToken, label);
-
-      logger.info('Token added for user', {
-        userId: interaction.user.id,
-        guildId,
-        label,
-      });
-
-      await interaction.editReply({
-        content: `Token added successfully. Label: ${label}`,
-      });
-    } catch (error) {
-      logger.error('Failed to add token', {
-        userId: interaction.user.id,
-        error: String(error),
-      });
-      await interaction.editReply({
-        content: `Failed to add token: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      });
-    }
-  }
-
-  // ============================================================================
-  // Add Webhook Modal
-  // ============================================================================
-
-  private async showAddWebhookModal(interaction: ButtonInteraction): Promise<void> {
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.reply({
-        content: 'This must be used in a server.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    const hasPremium = await isPremium(interaction.user.id, guildId);
-    if (!hasPremium) {
-      await interaction.reply({
-        content: 'Premium access required to add a webhook.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    const modal = new ModalBuilder()
-      .setCustomId('autojoiner_webhook_modal')
-      .setTitle('Add Win Webhook');
-
-    const webhookInput = new TextInputBuilder()
-      .setCustomId('webhook_url')
-      .setLabel('Webhook URL')
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('https://discord.com/api/webhooks/...')
-      .setRequired(true)
-      .setMinLength(30)
-      .setMaxLength(200);
-
-    const row = new ActionRowBuilder<TextInputBuilder>().addComponents(webhookInput);
-    modal.addComponents(row);
-
-    await interaction.showModal(modal);
-  }
-
-  async handleWebhookModal(interaction: ModalSubmitInteraction): Promise<void> {
-    if (interaction.customId !== 'autojoiner_webhook_modal') {
-      return;
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-
     const webhookUrl = interaction.fields.getTextInputValue('webhook_url').trim();
 
     const guildId = interaction.guildId;
@@ -260,88 +133,52 @@ export class AutoJoinerPanel {
     }
 
     try {
-      // Validate webhook URL format
-      if (!webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
-        await interaction.editReply({
-          content: 'Invalid webhook URL. Must start with https://discord.com/api/webhooks/',
-        });
-        return;
+      // Validate token (if provided and not masked)
+      if (token && token !== '••••••••••••••••') {
+        const isValid = await validateDiscordToken(token);
+        if (!isValid) {
+          await interaction.editReply({
+            content: 'Invalid Discord token. Please check and try again.',
+          });
+          return;
+        }
+
+        const encryptedToken = encryptToken(token);
+        await updateUserToken(interaction.user.id, guildId, encryptedToken, 'main');
       }
 
-      await updateUserWebhook(interaction.user.id, guildId, webhookUrl);
+      // Validate webhook format (if provided)
+      if (webhookUrl) {
+        if (!webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
+          await interaction.editReply({
+            content: 'Invalid webhook URL. Must start with https://discord.com/api/webhooks/',
+          });
+          return;
+        }
+        await updateUserWebhook(interaction.user.id, guildId, webhookUrl);
+      }
 
-      logger.info('Webhook added for user', {
+      // Ensure user is marked as premium
+      await setPremiumUser(interaction.user.id, guildId, 'manual');
+
+      logger.info('AutoJoiner settings updated', {
         userId: interaction.user.id,
         guildId,
+        hasToken: !!token && token !== '••••••••••••••••',
+        hasWebhook: !!webhookUrl,
       });
 
       await interaction.editReply({
-        content: 'Webhook added successfully.',
+        content: 'AutoJoiner settings saved successfully.',
       });
     } catch (error) {
-      logger.error('Failed to add webhook', {
+      logger.error('Failed to save AutoJoiner settings', {
         userId: interaction.user.id,
         error: String(error),
       });
       await interaction.editReply({
-        content: `Failed to add webhook: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        content: `Failed to save settings: ${error instanceof Error ? error.message : 'Unknown error'}`,
       });
     }
-  }
-
-  // ============================================================================
-  // Status
-  // ============================================================================
-
-  private async handleStatus(interaction: ButtonInteraction): Promise<void> {
-    await interaction.deferReply({ ephemeral: true });
-
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.editReply({
-        content: 'This must be used in a server.',
-      });
-      return;
-    }
-
-    const user = await getPremiumUser(interaction.user.id, guildId);
-
-    if (!user || !user.isPremium) {
-      await interaction.editReply({
-        content: 'You do not have premium access. Activate premium first.',
-      });
-      return;
-    }
-
-    const hasToken = user.token !== null;
-    const hasWebhook = user.webhookUrl !== null;
-
-    const statusLines = [
-      '**Auto Joiner Status**',
-      '',
-      `Premium: ✅`,
-      `Token: ${hasToken ? '✅ Set' : '❌ Not set'}`,
-      `Webhook: ${hasWebhook ? '✅ Set' : '❌ Not set'}`,
-    ];
-
-    if (hasToken) {
-      statusLines.push(`Token Label: ${user.tokenLabel || 'main'}`);
-      statusLines.push(`Token Added: ${new Date(user.tokenAddedAt || 0).toLocaleString()}`);
-      if (user.tokenEntries !== undefined) {
-        statusLines.push(`Entries: ${user.tokenEntries}`);
-      }
-      if (user.tokenWins !== undefined) {
-        statusLines.push(`Wins: ${user.tokenWins}`);
-      }
-      statusLines.push(`Active: ${user.tokenActive ? '✅' : '❌'}`);
-    }
-
-    if (hasWebhook) {
-      statusLines.push(`Webhook Added: ${new Date(user.webhookAddedAt || 0).toLocaleString()}`);
-    }
-
-    await interaction.editReply({
-      content: statusLines.join('\n'),
-    });
   }
 }
