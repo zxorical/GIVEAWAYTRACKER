@@ -55,13 +55,24 @@ function tokensEnv(): string[] {
 }
 
 export const CONFIG: AppConfig = {
+  // Self-bot tokens
   tokens: tokensEnv(),
+  
+  // Commercial bot
   botToken: requireEnv('DISCORD_BOT_TOKEN'),
   trackerChannelId: requireEnv('TRACKER_CHANNEL_ID'),
+  
+  // Monitoring
   monitoredChannels: csvEnv('MONITORED_CHANNELS'),
+  
+  // Database
   dbPath: optionalEnv('DB_PATH', './data/giveaways.json'),
+  
+  // Logging
   logLevel: optionalEnv('LOG_LEVEL', 'info'),
   logDir: optionalEnv('LOG_DIR', './logs'),
+  
+  // Notification
   notificationCooldown: assertInt(
     optionalEnv('NOTIFICATION_COOLDOWN', '30'),
     'NOTIFICATION_COOLDOWN', 10, 3600
@@ -70,8 +81,11 @@ export const CONFIG: AppConfig = {
     optionalEnv('STATS_INTERVAL_MS', '60000'),
     'STATS_INTERVAL_MS', 10000, 3600000
   ),
+  
+  // Admin
   adminUserIds: csvEnv('ADMIN_USER_IDS'),
-  // ─── ADD THESE MISSING PROPERTIES ───
+  
+  // Auto-join
   autoJoinInvites: csvEnv('AUTO_JOIN_INVITES'),
   webhookUrl: optionalEnv('WEBHOOK_URL', ''),
   winWebhookUrl: optionalEnv('WIN_WEBHOOK_URL', ''),
@@ -81,6 +95,7 @@ export const CONFIG: AppConfig = {
   retryDelayMs: parseInt(optionalEnv('RETRY_DELAY_MS', '1000')),
 };
 
+// Validate snowflakes
 CONFIG.monitoredChannels.forEach((id, i) => assertSnowflake(id, `MONITORED_CHANNELS[${i}]`));
 assertSnowflake(CONFIG.trackerChannelId, 'TRACKER_CHANNEL_ID');
 CONFIG.adminUserIds.forEach((id, i) => assertSnowflake(id, `ADMIN_USER_IDS[${i}]`));
@@ -120,3 +135,7 @@ console.log(`  - Admins: ${CONFIG.adminUserIds.length || 'None'}`);
 console.log(`  - Owner ID: ${ownerId ? 'Set' : 'Missing'}`);
 console.log(`  - Premium Role ID: ${premiumRoleId ? 'Set' : 'Missing'}`);
 console.log(`  - AutoJoin Invites: ${CONFIG.autoJoinInvites.length || 'None'}`);
+console.log(`  - Webhook URL: ${CONFIG.webhookUrl ? 'Set' : 'Missing'}`);
+console.log(`  - Win Webhook URL: ${CONFIG.winWebhookUrl ? 'Set' : 'Missing'}`);
+console.log(`  - Max Retries: ${CONFIG.maxRetries}`);
+console.log(`  - Retry Delay: ${CONFIG.retryDelayMs}ms`);
