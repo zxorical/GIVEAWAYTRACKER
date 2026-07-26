@@ -154,6 +154,24 @@ const WIN_PATTERNS: ReadonlyArray<RegExp> = [
 ];
 
 // ---------------------------------------------------------------------------
+// Internal Stats Interface
+// ---------------------------------------------------------------------------
+
+interface InternalStats {
+  totalDetected: number;
+  totalSucceeded: number;
+  totalFailed: number;
+  totalSkipped: number;
+  totalDuplicates: number;
+  totalWins: number;
+  serversJoined: number;
+  serversJoinFailed: number;
+  startedAt: number;
+  lastDetectedAt?: number;
+  lastSuccessAt?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Token-bucket rate limiter
 // ---------------------------------------------------------------------------
 
@@ -215,7 +233,7 @@ export class GiveawayManager extends EventEmitter {
   // Cleanup timer handle
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
 
-  private stats = {
+  private stats: InternalStats = {
     totalDetected: 0,
     totalSucceeded: 0,
     totalFailed: 0,
@@ -225,8 +243,8 @@ export class GiveawayManager extends EventEmitter {
     serversJoined: 0,
     serversJoinFailed: 0,
     startedAt: Date.now(),
-    lastDetectedAt: undefined as number | undefined,
-    lastSuccessAt: undefined as number | undefined,
+    lastDetectedAt: undefined,
+    lastSuccessAt: undefined,
   };
 
   // ---------------------------------------------------------------------------
@@ -251,7 +269,17 @@ export class GiveawayManager extends EventEmitter {
     this.state = {
       entries: new Map<string, GiveawayEntry>(),
       processing: new Set<string>(),
-      stats: this.getStats(),
+      stats: {
+        totalDetected: 0,
+        totalSucceeded: 0,
+        totalFailed: 0,
+        totalSkipped: 0,
+        totalDuplicates: 0,
+        totalWins: 0,
+        serversJoined: 0,
+        serversJoinFailed: 0,
+        startedAt: Date.now(),
+      },
     };
 
     this.cleanupHandle = setInterval(() => {
@@ -432,14 +460,19 @@ export class GiveawayManager extends EventEmitter {
   // Public utilities
   // ---------------------------------------------------------------------------
 
-  public getStats() {
+  public getStats(): GiveawayStats {
     const active = this.state.entries.size;
+    const servers = new Set(Array.from(this.state.entries.values()).map(e => e.guildId));
     return {
       totalDetected: this.stats.totalDetected,
       activeGiveaways: active,
-      serversWithGiveaways: new Set(Array.from(this.state.entries.values()).map(e => e.guildId)).size,
+      serversWithGiveaways: servers.size,
       lastDetected: this.stats.lastDetectedAt ?? null,
     };
+  }
+
+  public getInternalStats(): InternalStats {
+    return { ...this.stats };
   }
 
   public getEntryCount(): number { return this.state.entries.size; }
@@ -492,6 +525,17 @@ export class GiveawayManager extends EventEmitter {
       startedAt: Date.now(),
       lastDetectedAt: undefined,
       lastSuccessAt: undefined,
+    };
+    this.state.stats = {
+      totalDetected: 0,
+      totalSucceeded: 0,
+      totalFailed: 0,
+      totalSkipped: 0,
+      totalDuplicates: 0,
+      totalWins: 0,
+      serversJoined: 0,
+      serversJoinFailed: 0,
+      startedAt: Date.now(),
     };
     this.log.warn('GiveawayManager state reset — all entries cleared', {
       component: 'GiveawayManager',
@@ -569,7 +613,7 @@ export class GiveawayManager extends EventEmitter {
     const { entryId } = entry;
     entry.status = EntryStatus.ATTEMPTING;
     let lastError = '';
-    const maxAttempts = this.config.maxRetries + 1;
+    const maxAttempts = (this.config.maxRetries ?? 3) + 1;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       entry.attempts = attempt + 1;
@@ -725,7 +769,6 @@ export class GiveawayManager extends EventEmitter {
       await selfbotMsg.clickButton(button.customId);
       return;
     }
-    // If clickButton not available, try direct API
     await this.postInteractionDirect(message, button);
   }
 
