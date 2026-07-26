@@ -2,6 +2,14 @@
 /**
  * @module autoJoinService
  * Complete autojoin system for premium users
+ * 
+ * Handles:
+ * - Token storage & retrieval (encrypted)
+ * - Session management per user
+ * - Auto-entry on giveaway detection
+ * - Win detection & notifications (clean webhook only)
+ * - Rate limiting & retries
+ * - Stats tracking
  */
 
 import { Client, Message } from 'discord.js-selfbot-v13';
@@ -131,20 +139,24 @@ export class AutoJoinService extends EventEmitter {
     try {
       this.stats.totalDetected++;
 
-      const premiumUsers = await getAllPremiumUsers(guildId);
-      console.log('🔥 [AUTOJOIN] Found premium users:', {
-        guildId,
-        count: premiumUsers.length,
+      // ✅ Get ALL premium users with tokens (GLOBAL - not guild-specific)
+      const allPremiumUsers = await getAllPremiumUsers();
+      const premiumUsers = allPremiumUsers.filter(u => u.token && u.isPremium && u.tokenActive !== false);
+      
+      console.log('🔥 [AUTOJOIN] Found ALL premium users with tokens:', {
+        total: premiumUsers.length,
         users: premiumUsers.map(u => ({
           userId: u.userId,
-          isPremium: u.isPremium,
+          guildId: u.guildId,
           hasToken: !!u.token,
           tokenEntries: u.tokenEntries,
+          tokenActive: u.tokenActive,
         })),
       });
 
       if (premiumUsers.length === 0) {
-        console.log('🔥 [AUTOJOIN] ❌ No premium users found for guild:', guildId);
+        console.log('🔥 [AUTOJOIN] ❌ No premium users found with tokens');
+        logger.info('No premium users with tokens found', { component: 'AutoJoinService' });
         return;
       }
 
@@ -475,7 +487,8 @@ export class AutoJoinService extends EventEmitter {
         lastError = formatError(err);
         console.log(`🔥 [AUTOJOIN] ❌ Attempt ${attempt} failed:`, lastError);
         
-        if (lastError.includes('401') || lastError.includes('403') || lastError.includes('invalid')) {
+        // Only mark token invalid for auth errors, not for "no method" errors
+        if (lastError.includes('401') || lastError.includes('403')) {
           console.log(`🔥 [AUTOJOIN] ❌ Invalid token for user ${userId}, removing session`);
           this.sessions.delete(sessionKey);
           this.stats.activeSessions = this.sessions.size;
@@ -510,18 +523,20 @@ export class AutoJoinService extends EventEmitter {
     token: string,
   ): Promise<Client> {
     console.log(`🔥 [AUTOJOIN] 🚀 CREATING SESSION FOR ${userId}...`);
+    console.log(`🔥 [AUTOJOIN] Token starts with: ${token.substring(0, 20)}...`);
     
+    // ✅ Create a NEW selfbot client
     const client = new Client();
+
+    // Log the client's user ID once ready
+    client.once('ready', () => {
+      console.log(`🔥 [AUTOJOIN] ✅ Session created for user: ${client.user?.username} (${client.user?.id})`);
+      console.log(`🔥 [AUTOJOIN] This client is using token: ${token.substring(0, 20)}...`);
+    });
 
     // Debug listeners
     client.on('debug', (info) => {
       console.log(`🔥 [AUTOJOIN] [${userId}] Debug:`, info.slice(0, 100));
-    });
-
-    client.on('ready', () => {
-      console.log(`🔥 [AUTOJOIN] [${userId}] ✅✅✅ READY EVENT FIRED!`);
-      console.log(`🔥 [AUTOJOIN] [${userId}] User: ${client.user?.username}`);
-      console.log(`🔥 [AUTOJOIN] [${userId}] Guilds: ${client.guilds.cache.size}`);
     });
 
     client.on('error', (err) => {
@@ -532,23 +547,12 @@ export class AutoJoinService extends EventEmitter {
       console.log(`🔥 [AUTOJOIN] [${userId}] ⚠️ Disconnected`);
     });
 
-    // Message handler
+    // Message handler for win detection
     client.on('messageCreate', async (message: Message) => {
-      console.log(`🔥 [AUTOJOIN] [${userId}] 📨 MESSAGE RECEIVED!`, {
-        channelId: message.channel.id,
-        authorId: message.author?.id,
-        authorBot: message.author?.bot,
-        content: message.content?.slice(0, 50),
-        guildId: message.guild?.id,
-        hasEmbed: !!message.embeds?.length,
-        hasComponents: !!(message as any).components?.length,
-      });
-
-      if (message.author?.id === client.user?.id) {
-        console.log(`🔥 [AUTOJOIN] [${userId}] ⏭️ Skipping own message`);
-        return;
-      }
-
+      // Skip own messages
+      if (message.author?.id === client.user?.id) return;
+      
+      // Check for wins
       if (message.guild) {
         await this.checkGuildWin(message);
       } else {
@@ -617,7 +621,7 @@ export class AutoJoinService extends EventEmitter {
     return client;
   }
 
-  // ─── BUTTON CLICKING - DIRECT API ONLY ────────────────────────
+  // ─── BUTTON CLICKING - USING SELFBOBOT NATIVE METHODS ────────────
 
   private async clickButton(
     client: Client,
@@ -629,233 +633,136 @@ export class AutoJoinService extends EventEmitter {
       channelId,
       messageId,
       buttonCustomId,
+      clientUserId: client.user?.id,
+      clientUsername: client.user?.username,
+      isReady: client.isReady(),
     });
 
-    const token = (client as any).token;
-    if (!token) {
-      throw new Error('No token available from client');
-    }
-
-    const messageData = await this.fetchMessageData(token, channelId, messageId);
-    if (!messageData) {
-      throw new Error('Failed to fetch message data');
-    }
-
-    console.log(`🔥 [AUTOJOIN] Message data:`, {
-      hasComponents: !!(messageData.components?.length),
-      authorId: messageData.author?.id,
-      content: messageData.content?.slice(0, 100),
-      componentsCount: messageData.components?.length || 0,
-    });
-
-    let button = this.findButtonInMessage(messageData, buttonCustomId);
-    if (!button) {
-      button = this.findAnyEntryButtonInMessage(messageData);
-      if (!button) {
-        const available = this.listAvailableButtons(messageData);
-        console.log(`🔥 [AUTOJOIN] Available buttons:`, available);
-        throw new Error(`No entry button found. Available: ${available.map(b => b.label).join(', ')}`);
+    // ✅ USE THE SELFBOBOT'S NATIVE METHODS - NO API CALLS!
+    try {
+      // Fetch the channel using the selfbot client
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) {
+        throw new Error('Channel not found or not text-based');
       }
-    }
 
-    console.log(`🔥 [AUTOJOIN] Found button:`, {
-      customId: button.custom_id || button.customId,
-      label: button.label,
-      style: button.style,
-      disabled: button.disabled,
-    });
+      // Fetch the message using the selfbot client
+      const message = await channel.messages.fetch(messageId);
+      if (!message) {
+        throw new Error('Message not found');
+      }
 
-    await this.sendInteraction(token, channelId, messageId, buttonCustomId, messageData);
-    console.log(`🔥 [AUTOJOIN] ✅ Button clicked successfully via API`);
-  }
-
-  private async fetchMessageData(token: string, channelId: string, messageId: string): Promise<any> {
-    console.log(`🔥 [AUTOJOIN] fetchMessageData:`, { channelId, messageId });
-    
-    const url = `https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`;
-    console.log(`🔥 [AUTOJOIN] Fetching: ${url}`);
-    
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': token,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    console.log(`🔥 [AUTOJOIN] fetchMessageData response:`, {
-      status: response.status,
-      ok: response.ok,
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.log(`🔥 [AUTOJOIN] ❌ fetchMessageData failed:`, {
-        status: response.status,
-        text: text.substring(0, 200),
+      console.log(`🔥 [AUTOJOIN] Message fetched:`, {
+        id: message.id,
+        author: message.author?.username,
+        hasComponents: !!(message as any).components?.length,
       });
-      throw new Error(`Failed to fetch message: ${response.status} - ${text.substring(0, 100)}`);
-    }
 
-    const data = await response.json();
-    console.log(`🔥 [AUTOJOIN] fetchMessageData success:`, {
-      hasComponents: !!(data.components?.length),
-      hasEmbeds: !!(data.embeds?.length),
-      authorId: data.author?.id,
-      contentLength: data.content?.length,
-      componentsCount: data.components?.length || 0,
-    });
-    
-    return data;
-  }
-
-  private findButtonInMessage(messageData: any, customId: string): any {
-    const components = messageData.components || [];
-    
-    for (const row of components) {
-      for (const comp of row.components || []) {
-        if (comp.type === 2) {
-          const id = comp.custom_id || comp.customId;
-          if (id === customId && !comp.disabled) {
-            return comp;
+      // Find the button component
+      const components = (message as any).components || [];
+      let targetComponent = null;
+      
+      for (const row of components) {
+        for (const comp of row.components || []) {
+          if (comp.type === 2 && comp.customId === buttonCustomId) {
+            targetComponent = comp;
+            break;
           }
         }
+        if (targetComponent) break;
       }
-    }
-    return null;
-  }
 
-  private findAnyEntryButtonInMessage(messageData: any): any {
-    const components = messageData.components || [];
-    
-    const entryPatterns = [
-      /enter/i, /join/i, /giveaway/i, /participate/i, /raffle/i,
-      /🎉/, /🎁/, /🏆/,
-    ];
-    
-    const trustedIds = [
-      'giveaway_message', 'giveaway-enter', 'enter_giveaway',
-      'giveaway_enter', 'join_giveaway', 'giveaway-join',
-    ];
+      // If button not found by customId, try to find any entry button
+      if (!targetComponent) {
+        console.log(`🔥 [AUTOJOIN] Button ${buttonCustomId} not found, looking for any entry button...`);
+        for (const row of components) {
+          for (const comp of row.components || []) {
+            if (comp.type === 2 && !comp.disabled) {
+              const label = (comp.label || '').toLowerCase();
+              if (
+                label.includes('enter') ||
+                label.includes('join') ||
+                label.includes('participate') ||
+                label.includes('🎉') ||
+                label.includes('🎁') ||
+                /^\d[\d,]*$/.test(label)
+              ) {
+                targetComponent = comp;
+                console.log(`🔥 [AUTOJOIN] Found fallback entry button:`, {
+                  customId: comp.customId,
+                  label: comp.label,
+                });
+                break;
+              }
+            }
+          }
+          if (targetComponent) break;
+        }
+      }
 
-    for (const row of components) {
-      for (const comp of row.components || []) {
-        if (comp.type === 2 && !comp.disabled) {
-          const customId = comp.custom_id || comp.customId;
-          const label = (comp.label || '').toLowerCase();
+      if (!targetComponent) {
+        console.log(`🔥 [AUTOJOIN] No button component found`);
+        throw new Error(`Button ${buttonCustomId} not found`);
+      }
+
+      console.log(`🔥 [AUTOJOIN] Found button:`, {
+        customId: targetComponent.customId,
+        label: targetComponent.label,
+        style: targetComponent.style,
+        disabled: targetComponent.disabled,
+      });
+
+      // ✅ METHOD 1: Use the selfbot's clickButton method with component
+      if (typeof (message as any).clickButton === 'function') {
+        console.log(`🔥 [AUTOJOIN] Using selfbot clickButton method`);
+        
+        try {
+          await (message as any).clickButton(targetComponent);
+          console.log(`🔥 [AUTOJOIN] ✅ Selfbot clickButton succeeded (with component)`);
+          return;
+        } catch (err) {
+          console.log(`🔥 [AUTOJOIN] clickButton with component failed:`, formatError(err));
           
-          if (customId && trustedIds.includes(customId)) {
-            return comp;
-          }
-          if (entryPatterns.some(p => p.test(label))) {
-            return comp;
-          }
-          if (label.match(/^\d[\d,]*$/)) {
-            return comp;
-          }
-          if (label.includes('🎉') || label.includes('🎁')) {
-            return comp;
+          // Try with customId string as fallback
+          try {
+            await (message as any).clickButton(targetComponent.customId);
+            console.log(`🔥 [AUTOJOIN] ✅ Selfbot clickButton succeeded (with customId)`);
+            return;
+          } catch (err2) {
+            console.log(`🔥 [AUTOJOIN] clickButton with customId failed:`, formatError(err2));
           }
         }
       }
-    }
-    return null;
-  }
 
-  private listAvailableButtons(messageData: any): Array<{customId: string, label: string}> {
-    const buttons: Array<{customId: string, label: string}> = [];
-    const components = messageData.components || [];
-    for (const row of components) {
-      for (const comp of row.components || []) {
-        if (comp.type === 2) {
-          buttons.push({
-            customId: comp.custom_id || comp.customId || 'unknown',
-            label: comp.label || 'no-label',
-          });
+      // ✅ METHOD 2: Use the click method (alternative)
+      if (typeof (message as any).click === 'function') {
+        console.log(`🔥 [AUTOJOIN] Using fallback click method`);
+        try {
+          await (message as any).click(targetComponent);
+          console.log(`🔥 [AUTOJOIN] ✅ Fallback click succeeded`);
+          return;
+        } catch (err) {
+          console.log(`🔥 [AUTOJOIN] Fallback click failed:`, formatError(err));
         }
       }
-    }
-    return buttons;
-  }
 
-  private async sendInteraction(
-    token: string,
-    channelId: string,
-    messageId: string,
-    customId: string,
-    messageData: any
-  ): Promise<void> {
-    console.log(`🔥 [AUTOJOIN] sendInteraction:`, {
-      channelId,
-      messageId,
-      customId,
-    });
-
-    const nonce = `${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
-    const applicationId = messageData.author?.id || messageData.application_id;
-
-    if (!applicationId) {
-      console.log(`🔥 [AUTOJOIN] ❌ Could not determine application ID`);
-      console.log(`🔥 [AUTOJOIN] messageData keys:`, Object.keys(messageData));
-      throw new Error('Could not determine application ID');
-    }
-
-    const payload = {
-      type: 3,
-      nonce: nonce,
-      guild_id: messageData.guild_id || null,
-      channel_id: channelId,
-      message_id: messageId,
-      application_id: applicationId,
-      session_id: `autojoin-${Date.now()}`,
-      data: {
-        component_type: 2,
-        custom_id: customId,
-      },
-    };
-
-    console.log(`🔥 [AUTOJOIN] Sending interaction...`);
-
-    const response = await fetch('https://discord.com/api/v10/interactions', {
-      method: 'POST',
-      headers: {
-        'Authorization': token,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.log(`🔥 [AUTOJOIN] ❌ Interaction failed:`, {
-        status: response.status,
-        text: text.substring(0, 200),
-      });
-      
-      if (response.status === 429) {
-        const data = await response.json();
-        const retryAfter = data.retry_after || 1;
-        console.log(`🔥 [AUTOJOIN] Rate limited, waiting ${retryAfter}s...`);
-        await delay(retryAfter * 1000);
-        const retryResponse = await fetch('https://discord.com/api/v10/interactions', {
-          method: 'POST',
-          headers: {
-            'Authorization': token,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(payload),
-        });
-        if (!retryResponse.ok) {
-          const retryText = await retryResponse.text();
-          throw new Error(`Retry failed: ${retryResponse.status} - ${retryText}`);
+      // ✅ METHOD 3: Try clicking by customId directly
+      if (typeof (message as any).clickButton === 'function') {
+        try {
+          await (message as any).clickButton(buttonCustomId);
+          console.log(`🔥 [AUTOJOIN] ✅ Selfbot clickButton succeeded (direct customId)`);
+          return;
+        } catch (err) {
+          console.log(`🔥 [AUTOJOIN] clickButton direct customId failed:`, formatError(err));
         }
-        console.log(`🔥 [AUTOJOIN] ✅ Retry succeeded`);
-        return;
       }
-      
-      throw new Error(`Interaction failed: ${response.status} - ${text.substring(0, 100)}`);
-    }
 
-    console.log(`🔥 [AUTOJOIN] ✅ Interaction sent successfully`);
+      throw new Error('Could not click button - no click method available');
+
+    } catch (err) {
+      console.log(`🔥 [AUTOJOIN] ❌ clickButton error:`, formatError(err));
+      throw err;
+    }
   }
 
   // ─── WEBHOOK & UTILITY METHODS ────────────────────────────────
