@@ -173,25 +173,6 @@ async function main(): Promise<void> {
       
       // ✅ REGISTER EVENTS
       registerDiscordEvents(client, manager);
-      
-      // ✅ CONNECT AUTOJOIN TO GIVEAWAY EVENTS
-      manager.on('giveawayDetected', (entry) => {
-        if (autoJoinService && entry.buttonCustomId) {
-          console.log(`🔥 [AUTOJOIN] 🎯 AutoJoin triggered for: ${entry.prize}`);
-          autoJoinService.handleGiveawayDetected({
-            messageId: entry.messageId,
-            channelId: entry.channelId,
-            guildId: entry.guildId,
-            guildName: entry.guildName,
-            channelName: entry.channelName,
-            prize: entry.prize,
-            buttonCustomId: entry.buttonCustomId,
-            detectedAt: entry.detectedAt,
-          }).catch(err => {
-            console.error('🔥 [AUTOJOIN] Error:', err);
-          });
-        }
-      });
 
       logger.info(`[${label}] Calling waitForReady...`, { component: 'Bootstrap' });
 
