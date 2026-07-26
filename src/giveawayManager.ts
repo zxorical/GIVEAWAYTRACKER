@@ -163,6 +163,8 @@ export class GiveawayManager extends EventEmitter {
     errors: 0,
     falsePositivesBlocked: 0,
     watchlistMatches: 0,
+    serversJoined: 0,
+    serversJoinFailed: 0,
     startedAt: Date.now(),
   };
 
@@ -190,7 +192,107 @@ export class GiveawayManager extends EventEmitter {
   }
 
   // -------------------------------------------------------------------------
-  // Public API
+  // Public API - Win Detection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Handle a guild message that may be a win notification.
+   * Checks if our user ID is mentioned and matches win patterns.
+   */
+  public async handleWin(message: Message): Promise<boolean> {
+    if (!message.guild || !message.author?.bot) return false;
+
+    const myId = this.client.user?.id;
+    if (!myId) return false;
+
+    const mentionedInUsers = message.mentions?.users?.has(myId) ?? false;
+    const mentionedInContent = (message.content ?? '').includes(myId);
+    if (!mentionedInUsers && !mentionedInContent) return false;
+
+    const allText = this.getGiveawayText(message);
+    const winPatterns = [
+      /congratulations?[^.!?\n]{0,60}(?:you|won)/i,
+      /you(?:'ve|\s+have)\s+won/i,
+      /you\s+won\s/i,
+      /you\s+are\s+(?:a\s+)?(?:the\s+)?winner/i,
+      /\bwinner[s]?\b/i,
+      /has\s+won\s+(?:the\s+)?giveaway/i,
+      /won\s+the\s+giveaway/i,
+      /won\s+(?:a\s+)?(?:the\s+)?(?:prize|raffle|giveaway)/i,
+    ];
+
+    if (!winPatterns.some(re => re.test(allText))) return false;
+
+    const prize = this.extractPrize(message);
+    this.log.info('WIN DETECTED (guild)', {
+      component: 'GiveawayManager',
+      account: this.accountLabel,
+      prize,
+      guild: message.guild.name,
+      channel: (message.channel as any).name || 'unknown',
+    });
+
+    // Trigger autojoin service win detection if available
+    if (this.autoJoinService) {
+      await this.autoJoinService.checkGuildWin(message);
+    }
+
+    return true;
+  }
+
+  /**
+   * Handle a Direct Message that may be a win notification.
+   */
+  public async handleDmWin(message: Message): Promise<boolean> {
+    if (message.guild) return false;
+
+    const allText = this.getGiveawayText(message);
+    const winPatterns = [
+      /congratulations?[^.!?\n]{0,60}(?:you|won)/i,
+      /you(?:'ve|\s+have)\s+won/i,
+      /you\s+won\s/i,
+      /you\s+are\s+(?:a\s+)?(?:the\s+)?winner/i,
+      /\bwinner[s]?\b/i,
+      /has\s+won\s+(?:the\s+)?giveaway/i,
+      /won\s+the\s+giveaway/i,
+      /won\s+(?:a\s+)?(?:the\s+)?(?:prize|raffle|giveaway)/i,
+    ];
+
+    if (!winPatterns.some(re => re.test(allText))) return false;
+
+    const prize = this.extractPrize(message);
+    this.log.info('WIN DETECTED (DM)', {
+      component: 'GiveawayManager',
+      account: this.accountLabel,
+      prize,
+      from: message.author?.username || 'unknown',
+    });
+
+    // Trigger autojoin service win detection if available
+    if (this.autoJoinService) {
+      await this.autoJoinService.checkDmWin(message);
+    }
+
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API - Server Join Tracking
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record a server join attempt result.
+   */
+  public recordServerJoin(success: boolean): void {
+    if (success) {
+      this.stats.serversJoined++;
+    } else {
+      this.stats.serversJoinFailed++;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API - Message Handling
   // -------------------------------------------------------------------------
   public async handleMessage(message: Message): Promise<void> {
     const receivedAt = Date.now();
@@ -1016,6 +1118,8 @@ export class GiveawayManager extends EventEmitter {
     this.log.info(`  Errors              : ${s.errors}`);
     this.log.info(`  False positives blocked: ${s.falsePositivesBlocked}`);
     this.log.info(`  Watchlist matches   : ${s.watchlistMatches}`);
+    this.log.info(`  Servers joined      : ${s.serversJoined}`);
+    this.log.info(`  Servers join failed : ${s.serversJoinFailed}`);
     this.log.info(`  Uptime              : ${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`);
     this.log.info(`  Invites cached      : ${this.inviteCache.size}`);
     this.log.info(`────────────────────────────────────────────────────────`);
@@ -1029,6 +1133,8 @@ export class GiveawayManager extends EventEmitter {
       errors: 0, 
       falsePositivesBlocked: 0,
       watchlistMatches: 0,
+      serversJoined: 0,
+      serversJoinFailed: 0,
       startedAt: Date.now() 
     };
   }
