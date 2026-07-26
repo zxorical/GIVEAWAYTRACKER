@@ -12,7 +12,7 @@
  * - Stats tracking
  */
 
-import { Client, Message, Intents } from 'discord.js-selfbot-v13';
+import { Client, Message } from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { logger } from '../logger.js';
 import {
@@ -80,6 +80,16 @@ interface AutoJoinStats {
   totalWins: number;
   activeSessions: number;
   startedAt: number;
+}
+
+interface DiscordComponent {
+  type: number;
+  custom_id?: string;
+  customId?: string;
+  label?: string;
+  style?: number;
+  disabled?: boolean;
+  components?: DiscordComponent[];
 }
 
 // ─── AUTOJOIN SERVICE ─────────────────────────────────────────────
@@ -517,19 +527,8 @@ export class AutoJoinService extends EventEmitter {
   ): Promise<Client> {
     console.log(`🔥 [AUTOJOIN] Creating session for ${userId}...`);
     
-    // Create client with proper intents for selfbot
-    const client = new Client({
-      intents: [
-        'GUILDS',
-        'GUILD_MESSAGES', 
-        'DIRECT_MESSAGES',
-        'MESSAGE_CONTENT',
-        'GUILD_MESSAGE_REACTIONS',
-      ],
-      partials: ['MESSAGE', 'CHANNEL', 'REACTION'],
-      fetchAllMembers: false,
-      restTimeOffset: 0,
-    });
+    // Create client for selfbot - no intents needed for selfbot
+    const client = new Client();
 
     // Bind message handler with proper context
     const handleMessage = async (message: Message) => {
@@ -610,7 +609,7 @@ export class AutoJoinService extends EventEmitter {
 
       // Find the button component
       const components = (message as any).components || [];
-      let targetComponent = null;
+      let targetComponent: any = null;
 
       for (const row of components) {
         for (const comp of row.components || []) {
