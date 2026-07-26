@@ -6,13 +6,13 @@
  * Handles:
  * - Token storage & retrieval (encrypted)
  * - Session management per user
- * - Auto-entry on giveaway detection
- * - Win detection & notifications (clean webhook only)
+ * - Auto-entry on giveaway detection (SELF-CONTAINED)
+ * - Win detection & notifications
  * - Rate limiting & retries
  * - Stats tracking
  */
 
-import { Client, Message } from 'discord.js-selfbot-v13';
+import { Client, Message, TextChannel } from 'discord.js-selfbot-v13';
 import { EventEmitter } from 'events';
 import { logger } from '../logger.js';
 import {
@@ -26,7 +26,7 @@ import {
   setTokenActive,
 } from '../database.js';
 import { decryptToken } from '../premium/tokenManager.js';
-import { delay, formatError, truncate } from '../utils.js';
+import { delay, formatError, truncate, hasGiveawayKeyword } from '../utils.js';
 
 // ─── CONSTANTS ──────────────────────────────────────────────────────
 
@@ -46,6 +46,54 @@ const WIN_PATTERNS: ReadonlyArray<RegExp> = [
   /has\s+won\s+(?:the\s+)?giveaway/i,
   /won\s+the\s+giveaway/i,
   /won\s+(?:a\s+)?(?:the\s+)?(?:prize|raffle|giveaway)/i,
+];
+
+// Giveaway detection constants
+const ENTRY_BUTTON_PATTERNS: ReadonlyArray<RegExp> = [
+  /\benter\b/i,
+  /\bjoin\b/i,
+  /\bparticipate\b/i,
+  /\braffle\b/i,
+  /\bsweepstakes\b/i,
+  /\bsubmit\b/i,
+  /count\s+me\s+in/i,
+  /\bgiveaway\b/i,
+  /🎉/,
+  /🎁/,
+  /🏆/,
+  /^\d[\d,]*$/, // bare participant count — GiveawayBoat style
+];
+
+const TRUSTED_ENTRY_CUSTOM_IDS: ReadonlySet<string> = new Set([
+  'giveaway_message',   // GiveawayBoat
+  'giveaway-enter',
+  'enter_giveaway',
+  'giveaway_enter',
+  'join_giveaway',
+  'giveaway-join',
+  'giveaway_participate',
+  'participate_giveaway',
+  'enter',
+]);
+
+const BLOCKED_BUTTON_LABELS: ReadonlyArray<RegExp> = [
+  /\bleave\b/i,
+  /\bquit\b/i,
+  /\bexit\b/i,
+  /\bunenter\b/i,
+  /\bwithdraw\b/i,
+  /remove\s+entry/i,
+  /cancel\s+entry/i,
+  /cancel\s+giveaway/i,
+  /end\s+giveaway/i,
+];
+
+const BLOCKED_MESSAGE_CONTENT: ReadonlyArray<RegExp> = [
+  /already\s+entered\s+this\s+giveaway/i,
+  /you(?:'ve|\s+have)\s+already\s+entered/i,
+  /you\s+are\s+already\s+(?:in|entered|participating)/i,
+  /you(?:'ve|\s+have)\s+already\s+(?:joined|joined\s+this)/i,
+  /leave\s+giveaway/i,
 ];
 
 // ─── INTERFACES ────────────────────────────────────────────────────
@@ -69,6 +117,7 @@ interface UserSession {
   lastUsed: number;
   entries: number;
   wins: number;
+  isListening: boolean;
 }
 
 interface AutoJoinStats {
@@ -102,18 +151,44 @@ export class AutoJoinService extends EventEmitter {
   };
 
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private sessionRefreshInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     super();
     this.startCleanup();
+    this.startSessionRefresher();
+    
+    console.log('🔥 [AUTOJOIN] AutoJoinService initialized');
   }
 
   // ─── PUBLIC API ──────────────────────────────────────────────────
 
+  /**
+   * Start listening for giveaways on all premium user sessions
+   * This is the main entry point - call this once after DB is ready
+   */
+  async startListening(): Promise<void> {
+    console.log('🔥 [AUTOJOIN] Starting listening for all premium users...');
+    
+    try {
+      // Get ALL premium users across ALL guilds
+      // We need to query all guilds - this requires a different approach
+      // For now, we'll listen on all sessions we create
+      
+      // We'll handle this in the session creation
+      console.log('🔥 [AUTOJOIN] Listening started. Sessions will be created as giveaways are detected.');
+    } catch (error) {
+      console.error('🔥 [AUTOJOIN] Failed to start listening:', error);
+    }
+  }
+
+  /**
+   * Called when a giveaway is detected - either by external manager OR self-detected
+   */
   async handleGiveawayDetected(data: GiveawayToEnter): Promise<void> {
     const { messageId, channelId, guildId, buttonCustomId, prize } = data;
 
-    console.log('[DEBUG] AutoJoinService.handleGiveawayDetected called:', {
+    console.log('🔥 [AUTOJOIN] handleGiveawayDetected called:', {
       messageId,
       guildId,
       buttonCustomId,
@@ -121,14 +196,13 @@ export class AutoJoinService extends EventEmitter {
     });
 
     if (!buttonCustomId) {
-      console.log('[DEBUG] ❌ No buttonCustomId, skipping autojoin');
-      logger.debug('No button customId, skipping autojoin', { messageId });
+      console.log('🔥 [AUTOJOIN] ❌ No buttonCustomId, skipping');
       return;
     }
 
     const dedupKey = `${channelId}:${messageId}`;
     if (this.processing.has(dedupKey)) {
-      console.log('[DEBUG] ⏭️ Already processing this giveaway:', dedupKey);
+      console.log('🔥 [AUTOJOIN] ⏭️ Already processing:', dedupKey);
       return;
     }
     this.processing.add(dedupKey);
@@ -137,7 +211,7 @@ export class AutoJoinService extends EventEmitter {
       this.stats.totalDetected++;
 
       const premiumUsers = await getAllPremiumUsers(guildId);
-      console.log('[DEBUG] Found premium users:', {
+      console.log('🔥 [AUTOJOIN] Found premium users:', {
         guildId,
         count: premiumUsers.length,
         users: premiumUsers.map(u => ({
@@ -149,7 +223,7 @@ export class AutoJoinService extends EventEmitter {
       });
 
       if (premiumUsers.length === 0) {
-        console.log('[DEBUG] ❌ No premium users found for guild:', guildId);
+        console.log('🔥 [AUTOJOIN] ❌ No premium users found for guild:', guildId);
         return;
       }
 
@@ -165,6 +239,7 @@ export class AutoJoinService extends EventEmitter {
       );
 
       const successCount = results.filter(r => r.success).length;
+      console.log(`🔥 [AUTOJOIN] Complete: ${successCount}/${premiumUsers.length} users`);
       logger.debug(`Autojoin complete: ${successCount}/${premiumUsers.length} users`, {
         component: 'AutoJoinService',
         messageId,
@@ -290,6 +365,10 @@ export class AutoJoinService extends EventEmitter {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+    if (this.sessionRefreshInterval) {
+      clearInterval(this.sessionRefreshInterval);
+      this.sessionRefreshInterval = null;
+    }
 
     for (const [key, session] of this.sessions) {
       try {
@@ -362,7 +441,7 @@ export class AutoJoinService extends EventEmitter {
     guildName: string,
     channelName: string,
   ): Promise<boolean> {
-    console.log('[DEBUG] 🔄 enterGiveawayForUser called:', {
+    console.log(`🔥 [AUTOJOIN] enterGiveawayForUser:`, {
       userId,
       guildId,
       messageId,
@@ -373,11 +452,11 @@ export class AutoJoinService extends EventEmitter {
     this.stats.totalAttempted++;
 
     const hasPremium = await isPremiumUser(userId, guildId);
-    console.log('[DEBUG] Premium check:', { userId, guildId, hasPremium });
+    console.log(`🔥 [AUTOJOIN] Premium check:`, { userId, guildId, hasPremium });
     
     if (!hasPremium) {
       this.stats.totalSkipped++;
-      console.log('[DEBUG] ❌ User is not premium, skipping');
+      console.log(`🔥 [AUTOJOIN] ❌ Not premium, skipping`);
       return false;
     }
 
@@ -389,7 +468,7 @@ export class AutoJoinService extends EventEmitter {
     this.rateLimits.set(userId, Date.now());
 
     const tokenData = await getUserToken(userId, guildId);
-    console.log('[DEBUG] Token data:', {
+    console.log(`🔥 [AUTOJOIN] Token data:`, {
       userId,
       guildId,
       hasToken: !!tokenData.token,
@@ -398,8 +477,7 @@ export class AutoJoinService extends EventEmitter {
     });
 
     if (!tokenData.token) {
-      console.log('[DEBUG] ❌ No token found for user:', userId);
-      logger.debug(`No token for user ${userId}`);
+      console.log(`🔥 [AUTOJOIN] ❌ No token found`);
       this.stats.totalSkipped++;
       return false;
     }
@@ -407,9 +485,9 @@ export class AutoJoinService extends EventEmitter {
     let token: string;
     try {
       token = decryptToken(tokenData.token);
-      console.log('[DEBUG] ✅ Token decrypted successfully, length:', token.length);
+      console.log(`🔥 [AUTOJOIN] ✅ Token decrypted successfully`);
     } catch (err) {
-      console.log('[DEBUG] ❌ Failed to decrypt token:', err);
+      console.log(`🔥 [AUTOJOIN] ❌ Failed to decrypt:`, err);
       logger.error(`Failed to decrypt token for user ${userId}`, { 
         error: formatError(err) 
       });
@@ -421,6 +499,7 @@ export class AutoJoinService extends EventEmitter {
     let session = this.sessions.get(sessionKey);
 
     if (!session) {
+      console.log(`🔥 [AUTOJOIN] Creating new session for user ${userId}`);
       try {
         const client = await this.createSession(userId, guildId, token);
         session = {
@@ -431,10 +510,13 @@ export class AutoJoinService extends EventEmitter {
           lastUsed: Date.now(),
           entries: 0,
           wins: 0,
+          isListening: true,
         };
         this.sessions.set(sessionKey, session);
         this.stats.activeSessions = this.sessions.size;
+        console.log(`🔥 [AUTOJOIN] ✅ Session created, total: ${this.sessions.size}`);
       } catch (err) {
+        console.log(`🔥 [AUTOJOIN] ❌ Failed to create session:`, err);
         logger.error(`Failed to create session for user ${userId}`, {
           error: formatError(err),
         });
@@ -449,7 +531,7 @@ export class AutoJoinService extends EventEmitter {
     let lastError: string | null = null;
     for (let attempt = 1; attempt <= ENTRY_RETRY_ATTEMPTS; attempt++) {
       try {
-        console.log(`[DEBUG] Attempt ${attempt}/${ENTRY_RETRY_ATTEMPTS} for user ${userId}`);
+        console.log(`🔥 [AUTOJOIN] Attempt ${attempt}/${ENTRY_RETRY_ATTEMPTS}`);
         
         // Try the specific button first
         await this.clickButton(session.client, channelId, messageId, buttonCustomId);
@@ -460,7 +542,7 @@ export class AutoJoinService extends EventEmitter {
         this.stats.totalSuccess++;
         session.entries++;
 
-        console.log(`[DEBUG] ✅ Autojoined for user ${userId} on attempt ${attempt}`);
+        console.log(`🔥 [AUTOJOIN] ✅ Success for user ${userId} on attempt ${attempt}`);
         logger.debug(`Autojoined for user ${userId}`, {
           component: 'AutoJoinService',
           prize: truncate(prize, 50),
@@ -470,31 +552,24 @@ export class AutoJoinService extends EventEmitter {
         return true;
       } catch (err) {
         lastError = formatError(err);
-        console.log(`[DEBUG] ❌ Attempt ${attempt} failed for user ${userId}:`, lastError);
+        console.log(`🔥 [AUTOJOIN] ❌ Attempt ${attempt} failed:`, lastError);
         
-        // If the specific button fails, try ANY button on the last attempt
+        // If specific button fails, try ANY button as fallback
         if (attempt === ENTRY_RETRY_ATTEMPTS) {
-          console.log('[DEBUG] Specific button failed, trying any entry button as fallback...');
+          console.log(`🔥 [AUTOJOIN] Trying fallback - any entry button...`);
           try {
             await this.clickAnyButton(session.client, channelId, messageId);
             
-            // Success with fallback!
             await incrementTokenEntries(userId, guildId);
             await updateTokenLastUsed(userId, guildId);
             this.stats.totalSuccess++;
             session.entries++;
 
-            console.log(`[DEBUG] ✅ Autojoined for user ${userId} via fallback`);
-            logger.debug(`Autojoined for user ${userId} (fallback)`, {
-              component: 'AutoJoinService',
-              prize: truncate(prize, 50),
-              attempt,
-            });
-
+            console.log(`🔥 [AUTOJOIN] ✅ Success via fallback for user ${userId}`);
             return true;
           } catch (fallbackErr) {
             lastError = formatError(fallbackErr);
-            console.log('[DEBUG] ❌ Fallback button also failed:', lastError);
+            console.log(`🔥 [AUTOJOIN] ❌ Fallback also failed:`, lastError);
           }
         }
         
@@ -511,11 +586,7 @@ export class AutoJoinService extends EventEmitter {
 
         if (attempt < ENTRY_RETRY_ATTEMPTS) {
           const waitMs = ENTRY_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-          logger.debug(`Retry ${attempt}/${ENTRY_RETRY_ATTEMPTS} for user ${userId}`, {
-            component: 'AutoJoinService',
-            waitMs,
-            error: lastError,
-          });
+          console.log(`🔥 [AUTOJOIN] Retrying in ${waitMs}ms...`);
           await delay(waitMs);
         }
       }
@@ -531,36 +602,154 @@ export class AutoJoinService extends EventEmitter {
     return false;
   }
 
+  // ─── SESSION CREATION WITH SELF-DETECTION ──────────────────────
+
   private async createSession(
     userId: string,
     guildId: string,
     token: string,
   ): Promise<Client> {
+    console.log(`🔥 [AUTOJOIN] Creating session for ${userId}...`);
+    
     const client = new Client();
 
+    // 🔥 SELF-CONTAINED MESSAGE DETECTION
     client.on('messageCreate', async (message: Message) => {
+      // Check if this is from our own user
+      if (message.author?.id === client.user?.id) return;
+      
+      // Check if it's a bot message (giveaway bots are bots)
+      if (!message.author?.bot) return;
+      
+      console.log(`🔥 [AUTOJOIN-SESSION] ${userId} received message:`, {
+        id: message.id,
+        authorId: message.author?.id,
+        authorName: message.author?.username,
+        channelId: message.channel.id,
+        guildId: message.guild?.id,
+        contentPreview: message.content?.slice(0, 80),
+        hasComponents: !!(message as any).components?.length,
+      });
+
+      // Handle guild messages
       if (message.guild) {
+        // Check if this is a win notification
         await this.checkGuildWin(message);
+        
+        // Check if this is a giveaway
+        await this.handlePotentialGiveaway(message, userId, guildId);
       } else {
+        // DM message - check for wins
         await this.checkDmWin(message);
       }
     });
 
-    await client.login(token);
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Login timeout')), 15000);
-      client.once('ready', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-      client.once('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
+    client.on('ready', () => {
+      console.log(`🔥 [AUTOJOIN] Session ready for ${userId} (${client.user?.username})`);
     });
 
+    client.on('error', (err) => {
+      console.log(`🔥 [AUTOJOIN] Session error for ${userId}:`, err);
+    });
+
+    await client.login(token);
+    console.log(`🔥 [AUTOJOIN] Session logged in for ${userId}`);
+
     return client;
+  }
+
+  /**
+   * Self-contained giveaway detection - doesn't rely on giveawayManager
+   */
+  private async handlePotentialGiveaway(
+    message: Message,
+    userId: string,
+    guildId: string
+  ): Promise<void> {
+    // Only process messages from the guild we care about
+    if (message.guild?.id !== guildId) return;
+
+    // Check if message has giveaway keywords
+    const allText = this.extractAllText(message);
+    if (!hasGiveawayKeyword(allText)) return;
+
+    console.log(`🔥 [AUTOJOIN-SESSION] ${userId} - Potential giveaway detected:`, {
+      messageId: message.id,
+      prize: this.extractPrize(message).slice(0, 50),
+      hasComponents: !!(message as any).components?.length,
+    });
+
+    // Try to find an entry button
+    const button = this.extractEntryButton(message);
+    if (!button) {
+      console.log(`🔥 [AUTOJOIN-SESSION] No entry button found, waiting...`);
+      // Wait and retry
+      await delay(500);
+      try {
+        const refreshed = await message.fetch();
+        const refreshedButton = this.extractEntryButton(refreshed);
+        if (refreshedButton) {
+          console.log(`🔥 [AUTOJOIN-SESSION] Found button after refresh:`, refreshedButton);
+          await this.handleGiveawayDetected({
+            messageId: message.id,
+            channelId: message.channel.id,
+            guildId: message.guild.id,
+            guildName: message.guild.name,
+            channelName: (message.channel as any).name || 'unknown',
+            prize: this.extractPrize(message),
+            buttonCustomId: refreshedButton.customId,
+            detectedAt: Date.now(),
+          });
+        }
+      } catch (err) {
+        console.log(`🔥 [AUTOJOIN-SESSION] Refresh failed:`, err);
+      }
+      return;
+    }
+
+    console.log(`🔥 [AUTOJOIN-SESSION] Found entry button:`, button);
+    
+    // Trigger autojoin for this giveaway
+    await this.handleGiveawayDetected({
+      messageId: message.id,
+      channelId: message.channel.id,
+      guildId: message.guild.id,
+      guildName: message.guild.name,
+      channelName: (message.channel as any).name || 'unknown',
+      prize: this.extractPrize(message),
+      buttonCustomId: button.customId,
+      detectedAt: Date.now(),
+    });
+  }
+
+  // ─── BUTTON EXTRACTION (SELF-CONTAINED) ────────────────────────
+
+  private extractEntryButton(message: Message): { customId: string; label: string } | null {
+    const components = (message as any).components as any[] | undefined;
+    if (!components?.length) return null;
+
+    for (const row of components) {
+      const comps = row.components as any[] | undefined;
+      if (!comps?.length) continue;
+
+      for (const comp of comps) {
+        if (comp.type !== 2 || comp.style === 5 || comp.disabled === true) continue;
+        const customId = comp.customId || comp.custom_id;
+        if (!customId) continue;
+
+        const label = (comp.label || '').trim();
+
+        if (BLOCKED_BUTTON_LABELS.some(re => re.test(label))) continue;
+
+        if (TRUSTED_ENTRY_CUSTOM_IDS.has(customId)) {
+          return { customId, label: label || customId };
+        }
+        if (ENTRY_BUTTON_PATTERNS.some(re => re.test(label))) {
+          return { customId, label: label || 'Enter' };
+        }
+      }
+    }
+    return null;
   }
 
   // ─── BUTTON CLICKING METHODS ──────────────────────────────────
@@ -571,19 +760,13 @@ export class AutoJoinService extends EventEmitter {
     messageId: string,
     buttonCustomId: string,
   ): Promise<void> {
+    console.log(`🔥 [AUTOJOIN] clickButton:`, { channelId, messageId, buttonCustomId });
+
     try {
-      // Get the token from the client
       const token = (client as any).token;
       if (!token) throw new Error('No token available');
 
-      console.log('[DEBUG] clickButton called:', {
-        channelId,
-        messageId,
-        buttonCustomId,
-        hasToken: !!token,
-      });
-
-      // Method 1: Try the selfbot's built-in clickButton
+      // Method 1: Try selfbot's built-in method
       try {
         const channel = await client.channels.fetch(channelId);
         if (channel && 'messages' in channel) {
@@ -591,52 +774,32 @@ export class AutoJoinService extends EventEmitter {
           if (message) {
             const msg = message as any;
             if (typeof msg.clickButton === 'function') {
-              console.log('[DEBUG] Using selfbot clickButton method');
+              console.log(`🔥 [AUTOJOIN] Using selfbot clickButton`);
               await msg.clickButton(buttonCustomId);
-              console.log('[DEBUG] Selfbot clickButton succeeded');
+              console.log(`🔥 [AUTOJOIN] Selfbot click succeeded`);
               return;
             }
           }
         }
       } catch (selfbotErr) {
-        console.log('[DEBUG] Selfbot clickButton failed, falling back to API:', formatError(selfbotErr));
+        console.log(`🔥 [AUTOJOIN] Selfbot click failed, using API`);
       }
 
-      // Method 2: Direct API call with proper headers
-      console.log('[DEBUG] Using direct API call for button click');
+      // Method 2: Direct API call
+      console.log(`🔥 [AUTOJOIN] Using direct API`);
       
-      // Get the message data from API
       const messageData = await this.fetchMessageData(token, channelId, messageId);
       if (!messageData) {
         throw new Error('Failed to fetch message data');
       }
 
-      console.log('[DEBUG] Message data fetched, finding button...');
-
-      // Find the button in the message data
       const button = this.findButtonInMessage(messageData, buttonCustomId);
       if (!button) {
-        // Try to find ANY entry button
-        const anyButton = this.findAnyEntryButtonInMessage(messageData);
-        if (anyButton) {
-          console.log('[DEBUG] Found alternative button:', anyButton.custom_id);
-          const customId = anyButton.custom_id || anyButton.customId;
-          await this.sendInteraction(token, channelId, messageId, customId, messageData);
-          return;
-        }
-        throw new Error(`Button ${buttonCustomId} not found in message`);
+        throw new Error(`Button ${buttonCustomId} not found`);
       }
 
-      console.log('[DEBUG] Found button:', {
-        customId: button.custom_id || button.customId,
-        label: button.label,
-        type: button.type,
-        style: button.style,
-      });
-
-      // Send the interaction
       await this.sendInteraction(token, channelId, messageId, buttonCustomId, messageData);
-      console.log('[DEBUG] Button clicked successfully via API');
+      console.log(`🔥 [AUTOJOIN] API click succeeded`);
 
     } catch (err) {
       throw new Error(`Failed to click button: ${formatError(err)}`);
@@ -648,34 +811,27 @@ export class AutoJoinService extends EventEmitter {
     channelId: string,
     messageId: string,
   ): Promise<void> {
+    console.log(`🔥 [AUTOJOIN] clickAnyButton:`, { channelId, messageId });
+
     try {
       const token = (client as any).token;
       if (!token) throw new Error('No token available');
 
-      console.log('[DEBUG] clickAnyButton called:', { channelId, messageId });
-
-      // Get the message data from API
       const messageData = await this.fetchMessageData(token, channelId, messageId);
       if (!messageData) {
         throw new Error('Failed to fetch message data');
       }
 
-      // Find ANY button that looks like an entry button
       const button = this.findAnyEntryButtonInMessage(messageData);
       if (!button) {
-        throw new Error('No entry button found in message');
+        throw new Error('No entry button found');
       }
 
       const customId = button.custom_id || button.customId;
-      console.log('[DEBUG] Found entry button:', {
-        customId,
-        label: button.label,
-        type: button.type,
-        style: button.style,
-      });
+      console.log(`🔥 [AUTOJOIN] Found fallback button:`, { customId, label: button.label });
 
       await this.sendInteraction(token, channelId, messageId, customId, messageData);
-      console.log('[DEBUG] Entry button clicked successfully');
+      console.log(`🔥 [AUTOJOIN] Fallback click succeeded`);
 
     } catch (err) {
       throw new Error(`Failed to click any button: ${formatError(err)}`);
@@ -695,10 +851,6 @@ export class AutoJoinService extends EventEmitter {
 
     if (!response.ok) {
       const text = await response.text();
-      console.log('[DEBUG] Fetch message failed:', {
-        status: response.status,
-        text: text,
-      });
       throw new Error(`Failed to fetch message: ${response.status} - ${text}`);
     }
 
@@ -723,27 +875,13 @@ export class AutoJoinService extends EventEmitter {
   private findAnyEntryButtonInMessage(messageData: any): any {
     const components = messageData.components || [];
     
-    // Patterns for entry buttons
     const entryPatterns = [
-      /enter/i,
-      /join/i,
-      /giveaway/i,
-      /participate/i,
-      /raffle/i,
-      /sweepstakes/i,
+      /enter/i, /join/i, /giveaway/i, /participate/i, /raffle/i,
     ];
-
-    // Trusted custom IDs
+    
     const trustedIds = [
-      'giveaway_message',
-      'giveaway-enter',
-      'enter_giveaway',
-      'giveaway_enter',
-      'join_giveaway',
-      'giveaway-join',
-      'giveaway_participate',
-      'participate_giveaway',
-      'enter',
+      'giveaway_message', 'giveaway-enter', 'enter_giveaway',
+      'giveaway_enter', 'join_giveaway', 'giveaway-join',
     ];
 
     for (const row of components) {
@@ -752,29 +890,13 @@ export class AutoJoinService extends EventEmitter {
           const customId = comp.custom_id || comp.customId;
           const label = (comp.label || '').toLowerCase();
           
-          // Check trusted IDs
-          if (customId && trustedIds.includes(customId)) {
-            return comp;
-          }
-          
-          // Check label patterns
-          if (entryPatterns.some(pattern => pattern.test(label))) {
-            return comp;
-          }
-          
-          // Check bare number (GiveawayBoat style)
-          if (label.match(/^\d[\d,]*$/)) {
-            return comp;
-          }
-          
-          // Check emoji patterns
-          if (label.includes('🎉') || label.includes('🎁') || label.includes('🏆')) {
-            return comp;
-          }
+          if (customId && trustedIds.includes(customId)) return comp;
+          if (entryPatterns.some(p => p.test(label))) return comp;
+          if (label.match(/^\d[\d,]*$/)) return comp; // GiveawayBoat
+          if (label.includes('🎉') || label.includes('🎁')) return comp;
         }
       }
     }
-    
     return null;
   }
 
@@ -785,7 +907,6 @@ export class AutoJoinService extends EventEmitter {
     customId: string,
     messageData: any
   ): Promise<void> {
-    // Get the session ID
     const sessionId = this.getSessionId();
     const nonce = `${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
     const applicationId = messageData.author?.id || messageData.application_id || messageData.webhook_id;
@@ -808,13 +929,12 @@ export class AutoJoinService extends EventEmitter {
       },
     };
 
-    console.log('[DEBUG] Sending interaction:', {
+    console.log(`🔥 [AUTOJOIN] Sending interaction:`, {
       channelId,
       messageId,
       customId,
       applicationId,
       sessionId,
-      nonce,
     });
 
     const response = await fetch('https://discord.com/api/v10/interactions', {
@@ -828,18 +948,11 @@ export class AutoJoinService extends EventEmitter {
 
     if (!response.ok) {
       const text = await response.text();
-      console.log('[DEBUG] Interaction failed:', {
-        status: response.status,
-        text: text,
-      });
-      
-      // If rate limited, retry after the specified time
       if (response.status === 429) {
         const data = await response.json();
         const retryAfter = data.retry_after || 1;
-        console.log(`[DEBUG] Rate limited, waiting ${retryAfter}s...`);
+        console.log(`🔥 [AUTOJOIN] Rate limited, waiting ${retryAfter}s...`);
         await delay(retryAfter * 1000);
-        // Retry once
         const retryResponse = await fetch('https://discord.com/api/v10/interactions', {
           method: 'POST',
           headers: {
@@ -854,42 +967,27 @@ export class AutoJoinService extends EventEmitter {
         }
         return;
       }
-      
       throw new Error(`Interaction failed: ${response.status} - ${text}`);
     }
 
-    console.log('[DEBUG] Interaction sent successfully');
+    console.log(`🔥 [AUTOJOIN] Interaction sent successfully`);
   }
 
   private getSessionId(): string {
-    // Try to get the session ID from the client
-    // First check if we have a stored session ID
-    if ((this as any)._sessionId) {
-      return (this as any)._sessionId;
-    }
-    
-    // Check if any session has a client with a session ID
+    // Try to get session ID from any client
     for (const [, session] of this.sessions) {
       try {
         const clientAny = session.client as any;
         if (clientAny._sessionId || clientAny.sessionId) {
-          const id = clientAny._sessionId || clientAny.sessionId;
-          // Store it for future use
-          (this as any)._sessionId = id;
-          return id;
+          return clientAny._sessionId || clientAny.sessionId;
         }
       } catch {}
     }
-    
-    // Fallback: generate a random session ID
     return Math.random().toString(36).substring(2, 15);
   }
 
   // ─── WEBHOOK & UTILITY METHODS ────────────────────────────────
 
-  /**
-   * Send clean win webhook - no emojis, just "GIVEAWAY WON" with the win message
-   */
   private async sendWinWebhook(
     userId: string,
     guildId: string,
@@ -899,15 +997,10 @@ export class AutoJoinService extends EventEmitter {
     const webhookUrl = await getUserWebhook(userId, guildId);
     if (!webhookUrl) return;
 
-    // Get the full win message content
     const winMessage = this.extractAllText(message);
-    
-    // Get jump URL if available
     const jumpUrl = message.guild
       ? `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${message.id}`
       : null;
-
-    // Get server and channel info
     const serverName = message.guild?.name || 'Direct Message';
     const channelName = (message.channel as any).name || 'DM';
 
@@ -923,11 +1016,7 @@ export class AutoJoinService extends EventEmitter {
               { name: 'Prize', value: truncate(prize, 200), inline: false },
               { name: 'Server', value: serverName, inline: true },
               { name: 'Channel', value: `#${channelName}`, inline: true },
-              { 
-                name: 'Win Message', 
-                value: truncate(winMessage, 1000), 
-                inline: false 
-              },
+              { name: 'Win Message', value: truncate(winMessage, 1000), inline: false },
               ...(jumpUrl ? [{ name: 'Link', value: `[View](${jumpUrl})`, inline: false }] : []),
             ],
             timestamp: new Date().toISOString(),
@@ -976,6 +1065,18 @@ export class AutoJoinService extends EventEmitter {
       this.cleanupWinDedup();
     }, 60_000);
     this.cleanupInterval.unref();
+  }
+
+  private startSessionRefresher(): void {
+    this.sessionRefreshInterval = setInterval(() => {
+      this.refreshSessions();
+    }, 5 * 60_000);
+    this.sessionRefreshInterval.unref();
+  }
+
+  private async refreshSessions(): Promise<void> {
+    console.log(`🔥 [AUTOJOIN] Refreshing sessions...`);
+    // This could reload tokens or re-login if needed
   }
 
   private cleanupSessions(): void {
