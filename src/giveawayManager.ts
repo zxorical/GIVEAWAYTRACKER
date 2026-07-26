@@ -6,7 +6,6 @@
  */
 
 import { Client, Message, TextChannel } from 'discord.js-selfbot-v13';
-import axios from 'axios';
 import { EventEmitter } from 'events';
 import {
   AppConfig,
@@ -24,7 +23,6 @@ import { AutoJoinService } from './autojoin/AutoJoinService.js';
 import {
   hasGiveawayKeyword,
   delay,
-  exponentialBackoff,
   formatError,
   truncate,
   sanitizeForLog,
@@ -203,7 +201,7 @@ export class GiveawayManager extends EventEmitter {
   private readonly state: ManagerState;
   private readonly accountLabel: string;
   private readonly botManager: BotManager | null;
-  private readonly autoJoinService?: AutoJoinService; // ✅ ADDED
+  private readonly autoJoinService?: AutoJoinService;
 
   // Queue
   private readonly queue: GiveawayEntry[] = [];
@@ -214,14 +212,22 @@ export class GiveawayManager extends EventEmitter {
   /** Dedup map: `${channelId}:${authorId}` → timestamp of last win notification. */
   private readonly recentWins = new Map<string, number>();
 
-  // Rate limiters
-  private readonly interactionBucket = new TokenBucket(5, 1_000);
-
-  // Pre-built axios instance
-  private readonly http: ReturnType<typeof axios.create>;
-
   // Cleanup timer handle
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
+
+  private stats = {
+    totalDetected: 0,
+    totalSucceeded: 0,
+    totalFailed: 0,
+    totalSkipped: 0,
+    totalDuplicates: 0,
+    totalWins: 0,
+    serversJoined: 0,
+    serversJoinFailed: 0,
+    startedAt: Date.now(),
+    lastDetectedAt: undefined as number | undefined,
+    lastSuccessAt: undefined as number | undefined,
+  };
 
   // ---------------------------------------------------------------------------
 
@@ -232,7 +238,7 @@ export class GiveawayManager extends EventEmitter {
     token: string,
     accountLabel = 'main',
     botManager: BotManager | null = null,
-    autoJoinService?: AutoJoinService, // ✅ ADDED
+    autoJoinService?: AutoJoinService,
   ) {
     super();
     this.client = client;
@@ -240,25 +246,12 @@ export class GiveawayManager extends EventEmitter {
     this.log = log;
     this.accountLabel = accountLabel;
     this.botManager = botManager;
-    this.autoJoinService = autoJoinService; // ✅ ADDED
-
-    this.http = axios.create({
-      baseURL: 'https://discord.com/api/v10',
-      headers: {
-        'Authorization': token,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'X-Super-Properties': Buffer.from(
-          JSON.stringify({ os: 'Windows', browser: 'Chrome', device: '' }),
-        ).toString('base64'),
-      },
-      timeout: 10_000,
-    });
+    this.autoJoinService = autoJoinService;
 
     this.state = {
       entries: new Map<string, GiveawayEntry>(),
       processing: new Set<string>(),
-      stats: this.buildStats(),
+      stats: this.getStats(),
     };
 
     this.cleanupHandle = setInterval(() => {
@@ -285,7 +278,7 @@ export class GiveawayManager extends EventEmitter {
     const entryId = this.makeId(message);
 
     if (this.state.entries.has(entryId)) {
-      this.state.stats.totalDuplicates++;
+      this.stats.totalDuplicates++;
       return;
     }
     if (this.state.processing.has(entryId)) return;
@@ -315,8 +308,8 @@ export class GiveawayManager extends EventEmitter {
       };
 
       this.state.entries.set(entryId, entry);
-      this.state.stats.totalDetected++;
-      this.state.stats.lastDetectedAt = Date.now();
+      this.stats.totalDetected++;
+      this.stats.lastDetectedAt = Date.now();
 
       this.log.info('🎯 Giveaway detected', {
         component: 'GiveawayManager',
@@ -330,10 +323,10 @@ export class GiveawayManager extends EventEmitter {
         endsAt: entry.endsAt ? formatTimestamp(entry.endsAt) : 'unknown',
       });
 
-      // ✅ EMIT EVENT FOR AUTOJOIN
+      // EMIT EVENT FOR AUTOJOIN
       this.emit('giveawayDetected', entry);
 
-      // ✅ DIRECTLY CALL AUTOJOIN SERVICE
+      // DIRECTLY CALL AUTOJOIN SERVICE
       if (this.autoJoinService && detected.button?.customId) {
         console.log(`🔥 [AUTOJOIN] 🎯 AutoJoin triggered for: ${entry.prize}`);
         this.autoJoinService.handleGiveawayDetected({
@@ -345,8 +338,8 @@ export class GiveawayManager extends EventEmitter {
           prize: entry.prize,
           buttonCustomId: detected.button.customId,
           detectedAt: entry.detectedAt,
-        }).catch(err => {
-          console.error('🔥 [AUTOJOIN] Error:', err);
+        }).catch((err: unknown) => {
+          console.error('🔥 [AUTOJOIN] Error:', formatError(err));
         });
       }
 
@@ -410,7 +403,7 @@ export class GiveawayManager extends EventEmitter {
       ? 'Direct Message'
       : `#${(message.channel as { name?: string }).name ?? message.channel.id} in ${message.guild?.name ?? 'unknown server'}`;
 
-    this.state.stats.totalWins++;
+    this.stats.totalWins++;
 
     this.log.info('🏆 WIN DETECTED', {
       component: 'GiveawayManager',
@@ -439,17 +432,26 @@ export class GiveawayManager extends EventEmitter {
   // Public utilities
   // ---------------------------------------------------------------------------
 
-  public getStats(): Readonly<GiveawayStats> { return { ...this.state.stats }; }
+  public getStats() {
+    const active = this.state.entries.size;
+    return {
+      totalDetected: this.stats.totalDetected,
+      activeGiveaways: active,
+      serversWithGiveaways: new Set(Array.from(this.state.entries.values()).map(e => e.guildId)).size,
+      lastDetected: this.stats.lastDetectedAt ?? null,
+    };
+  }
+
   public getEntryCount(): number { return this.state.entries.size; }
   public getQueueLength(): number { return this.queue.length; }
 
   public recordServerJoin(success: boolean): void {
-    if (success) this.state.stats.serversJoined++;
-    else this.state.stats.serversJoinFailed++;
+    if (success) this.stats.serversJoined++;
+    else this.stats.serversJoinFailed++;
   }
 
-  public logStatsSummary(): void {
-    const s = this.state.stats;
+  public logStats(): void {
+    const s = this.stats;
     const rows: [string, string | number][] = [
       ['Account', this.accountLabel],
       ['Uptime', formatDuration(Date.now() - s.startedAt)],
@@ -478,7 +480,19 @@ export class GiveawayManager extends EventEmitter {
     this.recentWins.clear();
     this.queue.length = 0;
     this.activeEntries = 0;
-    this.state.stats = this.buildStats();
+    this.stats = {
+      totalDetected: 0,
+      totalSucceeded: 0,
+      totalFailed: 0,
+      totalSkipped: 0,
+      totalDuplicates: 0,
+      totalWins: 0,
+      serversJoined: 0,
+      serversJoinFailed: 0,
+      startedAt: Date.now(),
+      lastDetectedAt: undefined,
+      lastSuccessAt: undefined,
+    };
     this.log.warn('GiveawayManager state reset — all entries cleared', {
       component: 'GiveawayManager',
       account: this.accountLabel,
@@ -506,7 +520,7 @@ export class GiveawayManager extends EventEmitter {
       ]);
     }
 
-    this.logStatsSummary();
+    this.logStats();
   }
 
   // ---------------------------------------------------------------------------
@@ -562,7 +576,7 @@ export class GiveawayManager extends EventEmitter {
       entry.lastAttemptAt = Date.now();
 
       if (attempt > 0) {
-        const backoffMs = exponentialBackoff(attempt - 1, this.config.retryDelayMs, 30_000);
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 30000);
         this.log.info(`Retry ${attempt + 1}/${maxAttempts}`, {
           component: 'GiveawayManager',
           account: this.accountLabel,
@@ -577,8 +591,8 @@ export class GiveawayManager extends EventEmitter {
         if (skipped) return;
 
         entry.status = EntryStatus.SUCCESS;
-        this.state.stats.totalSucceeded++;
-        this.state.stats.lastSuccessAt = Date.now();
+        this.stats.totalSucceeded++;
+        this.stats.lastSuccessAt = Date.now();
 
         this.log.info('✅ Entered giveaway', {
           component: 'GiveawayManager',
@@ -606,7 +620,7 @@ export class GiveawayManager extends EventEmitter {
     }
 
     entry.status = EntryStatus.FAILED;
-    this.state.stats.totalFailed++;
+    this.stats.totalFailed++;
 
     this.log.error('❌ All retries exhausted', {
       component: 'GiveawayManager',
@@ -633,7 +647,9 @@ export class GiveawayManager extends EventEmitter {
   private async enterViaButton(entry: GiveawayEntry): Promise<boolean> {
     if (!entry.buttonCustomId) throw new Error('No buttonCustomId set on entry');
 
-    if (this.config.buttonDelayMs > 0) await delay(this.config.buttonDelayMs);
+    if (this.config.buttonDelayMs && this.config.buttonDelayMs > 0) {
+      await delay(this.config.buttonDelayMs);
+    }
 
     const message = await this.fetchMessage(entry.channelId, entry.messageId);
     if (!message) throw new Error(`Message ${entry.messageId} not found on re-fetch`);
@@ -648,7 +664,7 @@ export class GiveawayManager extends EventEmitter {
         customId: entry.buttonCustomId,
       });
       entry.status = EntryStatus.SKIPPED;
-      this.state.stats.totalSkipped++;
+      this.stats.totalSkipped++;
       return true;
     }
 
@@ -660,7 +676,7 @@ export class GiveawayManager extends EventEmitter {
         customId: entry.buttonCustomId,
       });
       entry.status = EntryStatus.SKIPPED;
-      this.state.stats.totalSkipped++;
+      this.stats.totalSkipped++;
       return true;
     }
 
@@ -675,7 +691,9 @@ export class GiveawayManager extends EventEmitter {
   private async enterViaReaction(entry: GiveawayEntry): Promise<boolean> {
     const emoji = entry.reactionEmoji ?? '🎉';
 
-    if (this.config.reactionDelayMs > 0) await delay(this.config.reactionDelayMs);
+    if (this.config.reactionDelayMs && this.config.reactionDelayMs > 0) {
+      await delay(this.config.reactionDelayMs);
+    }
 
     const message = await this.fetchMessage(entry.channelId, entry.messageId);
     if (!message) throw new Error(`Message ${entry.messageId} not found on re-fetch`);
@@ -689,7 +707,7 @@ export class GiveawayManager extends EventEmitter {
         emoji,
       });
       entry.status = EntryStatus.SKIPPED;
-      this.state.stats.totalSkipped++;
+      this.stats.totalSkipped++;
       return true;
     }
 
@@ -707,17 +725,16 @@ export class GiveawayManager extends EventEmitter {
       await selfbotMsg.clickButton(button.customId);
       return;
     }
-    await this.postInteraction(message, button);
+    // If clickButton not available, try direct API
+    await this.postInteractionDirect(message, button);
   }
 
-  private async postInteraction(message: Message, button: GiveawayButton): Promise<void> {
-    await this.interactionBucket.consume();
+  private async postInteractionDirect(message: Message, button: GiveawayButton): Promise<void> {
+    const token = (this.client as any).token;
+    if (!token) throw new Error('No token available');
 
-    const clientAny = this.client as unknown as Record<string, unknown>;
-    const sessionId = (clientAny['sessionId'] ?? clientAny['session_id'] ?? Date.now().toString()) as string;
     const nonce = `${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
-    const messageAny = message as unknown as Record<string, unknown>;
-    const appId = (messageAny['applicationId'] ?? messageAny['application_id'] ?? message.author?.id) as string | undefined;
+    const appId = (message as any).applicationId ?? (message as any).application_id ?? message.author?.id;
 
     const payload = {
       type: 3,
@@ -726,33 +743,22 @@ export class GiveawayManager extends EventEmitter {
       channel_id: message.channel.id,
       message_id: message.id,
       application_id: appId,
-      session_id: sessionId,
+      session_id: `giveaway-${Date.now()}`,
       data: { component_type: 2, custom_id: button.customId },
     };
 
-    try {
-      await this.http.post('/interactions', payload);
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { retry_after?: number } } };
-      const status = axiosErr.response?.status;
+    const response = await fetch('https://discord.com/api/v10/interactions', {
+      method: 'POST',
+      headers: {
+        'Authorization': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
 
-      if (status === 429) {
-        const retryAfterMs = Math.ceil((axiosErr.response?.data?.retry_after ?? 1) * 1_000);
-        this.log.warn(`Interaction rate-limited — retrying after ${retryAfterMs}ms`, {
-          component: 'GiveawayManager',
-          account: this.accountLabel,
-          customId: button.customId,
-        });
-        await delay(retryAfterMs);
-        await this.http.post('/interactions', payload);
-        return;
-      }
-
-      if (status === 404) throw new Error('Interaction 404 — message or channel no longer exists');
-      if (status === 401 || status === 403) throw new Error(`Interaction ${status} — check token / permissions`);
-
-      const errMsg = axiosErr instanceof Error ? axiosErr.message : String(err);
-      throw new Error(`Interaction POST failed (HTTP ${status ?? 'unknown'}): ${errMsg}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Interaction failed: ${response.status} - ${text.slice(0, 100)}`);
     }
   }
 
@@ -929,8 +935,6 @@ export class GiveawayManager extends EventEmitter {
       ].join(' ');
       
       if (hasGiveawayKeyword(text)) return true;
-      
-      // Check for giveaway-specific patterns
       if (/\bends?\s+in\b/i.test(text)) return true;
       if (/\bwinners?\b/i.test(text)) return true;
       if (/\bprize\b/i.test(text)) return true;
@@ -1010,23 +1014,31 @@ export class GiveawayManager extends EventEmitter {
 
     const jumpUrl = `https://discord.com/channels/${entry.guildId}/${entry.channelId}/${entry.messageId}`;
 
-    await this.postWebhook(url, {
-      username: 'Giveaway Bot',
-      embeds: [{
-        title: '🎉 Giveaway Entered',
-        color: 0x57F287,
-        fields: [
-          { name: '🏆 Prize', value: entry.prize, inline: false },
-          { name: '🏠 Server', value: entry.guildName, inline: true },
-          { name: '📢 Channel', value: `#${entry.channelName}`, inline: true },
-          { name: '🔁 Attempts', value: String(entry.attempts), inline: true },
-          { name: '🔗 Jump', value: `[View](${jumpUrl})`, inline: false },
-          { name: '⏰ Time', value: formatTimestamp(Date.now()), inline: false },
-        ],
-        footer: { text: `Entry: ${entry.entryId} • ${this.accountLabel}` },
-        timestamp: new Date().toISOString(),
-      }],
-    });
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'Giveaway Bot',
+          embeds: [{
+            title: '🎉 Giveaway Entered',
+            color: 0x57F287,
+            fields: [
+              { name: '🏆 Prize', value: entry.prize, inline: false },
+              { name: '🏠 Server', value: entry.guildName, inline: true },
+              { name: '📢 Channel', value: `#${entry.channelName}`, inline: true },
+              { name: '🔁 Attempts', value: String(entry.attempts), inline: true },
+              { name: '🔗 Jump', value: `[View](${jumpUrl})`, inline: false },
+              { name: '⏰ Time', value: formatTimestamp(Date.now()), inline: false },
+            ],
+            footer: { text: `Entry: ${entry.entryId} • ${this.accountLabel}` },
+            timestamp: new Date().toISOString(),
+          }],
+        }),
+      });
+    } catch (err) {
+      this.log.debug('Webhook send failed', { error: formatError(err) });
+    }
   }
 
   private async sendWinWebhook(message: Message, prize: string, sourceName: string): Promise<void> {
@@ -1045,50 +1057,32 @@ export class GiveawayManager extends EventEmitter {
       : null;
     const authorName = message.author?.username ?? message.author?.id ?? 'unknown';
 
-    await this.postWebhook(url, {
-      content: '@everyone',
-      username: 'WIN Notifier',
-      embeds: [{
-        title: '🏆 GIVEAWAY WIN!',
-        description: jumpUrl ? `[Jump to message](${jumpUrl})` : 'Won via Direct Message',
-        color: 0xFFD700,
-        fields: [
-          { name: '🎁 Prize', value: prize, inline: false },
-          { name: '🏠 Server', value: guildName, inline: true },
-          { name: '📢 Source', value: sourceName, inline: true },
-          { name: '🤖 Bot', value: authorName, inline: true },
-          { name: '👤 Account', value: this.accountLabel, inline: true },
-          { name: '⏰ Won At', value: formatTimestamp(Date.now()), inline: false },
-        ],
-        footer: { text: `Message ID: ${message.id}` },
-        timestamp: new Date().toISOString(),
-      }],
-    });
-  }
-
-  private async postWebhook(url: string, payload: Record<string, unknown>): Promise<void> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await axios.post(url, payload, { timeout: 8_000 });
-        return;
-      } catch (err: unknown) {
-        const axiosErr = err as { response?: { status?: number; data?: { retry_after?: number } } };
-        const status = axiosErr.response?.status;
-
-        if (status === 429 && attempt === 0) {
-          const wait = Math.ceil((axiosErr.response?.data?.retry_after ?? 2) * 1_000);
-          await delay(wait);
-          continue;
-        }
-
-        this.log.warn('Webhook POST failed', {
-          component: 'GiveawayManager',
-          account: this.accountLabel,
-          status,
-          error: formatError(err),
-        });
-        return;
-      }
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: '@everyone',
+          username: 'WIN Notifier',
+          embeds: [{
+            title: '🏆 GIVEAWAY WIN!',
+            description: jumpUrl ? `[Jump to message](${jumpUrl})` : 'Won via Direct Message',
+            color: 0xFFD700,
+            fields: [
+              { name: '🎁 Prize', value: prize, inline: false },
+              { name: '🏠 Server', value: guildName, inline: true },
+              { name: '📢 Source', value: sourceName, inline: true },
+              { name: '🤖 Bot', value: authorName, inline: true },
+              { name: '👤 Account', value: this.accountLabel, inline: true },
+              { name: '⏰ Won At', value: formatTimestamp(Date.now()), inline: false },
+            ],
+            footer: { text: `Message ID: ${message.id}` },
+            timestamp: new Date().toISOString(),
+          }],
+        }),
+      });
+    } catch (err) {
+      this.log.debug('Win webhook send failed', { error: formatError(err) });
     }
   }
 
@@ -1127,20 +1121,6 @@ export class GiveawayManager extends EventEmitter {
 
   private makeId(message: Message): string {
     return `${message.channel.id}:${message.id}`;
-  }
-
-  private buildStats(): GiveawayStats {
-    return {
-      totalDetected: 0,
-      totalSucceeded: 0,
-      totalFailed: 0,
-      totalSkipped: 0,
-      totalDuplicates: 0,
-      totalWins: 0,
-      serversJoined: 0,
-      serversJoinFailed: 0,
-      startedAt: Date.now(),
-    };
   }
 }
 
