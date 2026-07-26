@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   cleanupOldGiveaways(30).catch(err => logger.warn('cleanupOldGiveaways error', { error: err }));
 
   // --------------------------------------------------------------------------
-  // INITIALIZE AUTOJOIN SERVICE
+  // ✅ INITIALIZE AUTOJOIN SERVICE
   // --------------------------------------------------------------------------
   autoJoinService = new AutoJoinService();
   logger.info('AutoJoinService initialized', { component: 'Bootstrap' });
@@ -160,15 +160,38 @@ async function main(): Promise<void> {
         logger.error(`[${label}] Client error event: ${formatError(err)}`, { component: 'Client' });
       });
 
+      // ✅ CREATE GIVEAWAY MANAGER WITH AUTOJOIN SERVICE
       const manager = new GiveawayManager(
         client,
-        logger,
-        token,
-        label,
-        botManager,
-        autoJoinService // ← Pass AutoJoinService
+        CONFIG,      // Pass config
+        logger,      // Pass logger
+        token,       // Pass token
+        label,       // Account label
+        botManager,  // Bot manager
+        autoJoinService // ✅ Pass AutoJoinService
       );
+      
+      // ✅ REGISTER EVENTS
       registerDiscordEvents(client, manager);
+      
+      // ✅ CONNECT AUTOJOIN TO GIVEAWAY EVENTS
+      manager.on('giveawayDetected', (entry) => {
+        if (autoJoinService && entry.buttonCustomId) {
+          console.log(`🔥 [AUTOJOIN] 🎯 AutoJoin triggered for: ${entry.prize}`);
+          autoJoinService.handleGiveawayDetected({
+            messageId: entry.messageId,
+            channelId: entry.channelId,
+            guildId: entry.guildId,
+            guildName: entry.guildName,
+            channelName: entry.channelName,
+            prize: entry.prize,
+            buttonCustomId: entry.buttonCustomId,
+            detectedAt: entry.detectedAt,
+          }).catch(err => {
+            console.error('🔥 [AUTOJOIN] Error:', err);
+          });
+        }
+      });
 
       logger.info(`[${label}] Calling waitForReady...`, { component: 'Bootstrap' });
 
