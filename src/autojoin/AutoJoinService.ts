@@ -496,7 +496,6 @@ export class AutoJoinService extends EventEmitter {
         lastError = formatError(err);
         console.log(`🔥 [AUTOJOIN] ❌ Attempt ${attempt} failed:`, lastError);
         
-        // Only mark token invalid for auth errors, not for "no method" errors
         if (lastError.includes('401') || lastError.includes('403')) {
           console.log(`🔥 [AUTOJOIN] ❌ Invalid token for user ${userId}, removing session`);
           this.sessions.delete(sessionKey);
@@ -534,16 +533,13 @@ export class AutoJoinService extends EventEmitter {
     console.log(`🔥 [AUTOJOIN] 🚀 CREATING SESSION FOR ${userId}...`);
     console.log(`🔥 [AUTOJOIN] Token starts with: ${token.substring(0, 20)}...`);
     
-    // ✅ Create a NEW selfbot client
     const client = new Client();
 
-    // Log the client's user ID once ready
     client.once('ready', () => {
       console.log(`🔥 [AUTOJOIN] ✅ Session created for user: ${client.user?.username} (${client.user?.id})`);
       console.log(`🔥 [AUTOJOIN] This client is using token: ${token.substring(0, 20)}...`);
     });
 
-    // Debug listeners
     client.on('debug', (info) => {
       console.log(`🔥 [AUTOJOIN] [${userId}] Debug:`, info.slice(0, 100));
     });
@@ -556,12 +552,8 @@ export class AutoJoinService extends EventEmitter {
       console.log(`🔥 [AUTOJOIN] [${userId}] ⚠️ Disconnected`);
     });
 
-    // Message handler for win detection
     client.on('messageCreate', async (message: Message) => {
-      // Skip own messages
       if (message.author?.id === client.user?.id) return;
-      
-      // Check for wins
       if (message.guild) {
         await this.checkGuildWin(message);
       } else {
@@ -647,15 +639,12 @@ export class AutoJoinService extends EventEmitter {
       isReady: client.isReady(),
     });
 
-    // ✅ USE THE SELFBOBOT'S NATIVE METHODS - NO API CALLS!
     try {
-      // Fetch the channel using the selfbot client
       const channel = await client.channels.fetch(channelId);
       if (!channel || !('messages' in channel)) {
         throw new Error('Channel not found or not text-based');
       }
 
-      // Fetch the message using the selfbot client
       const message = await channel.messages.fetch(messageId);
       if (!message) {
         throw new Error('Message not found');
@@ -667,7 +656,6 @@ export class AutoJoinService extends EventEmitter {
         hasComponents: !!(message as any).components?.length,
       });
 
-      // Find the button component
       const components = (message as any).components || [];
       let targetComponent: ButtonComponent | null = null;
       
@@ -684,7 +672,6 @@ export class AutoJoinService extends EventEmitter {
         if (targetComponent) break;
       }
 
-      // If button not found by customId, try to find any entry button
       if (!targetComponent) {
         console.log(`🔥 [AUTOJOIN] Button ${buttonCustomId} not found, looking for any entry button...`);
         for (const row of components) {
@@ -725,7 +712,6 @@ export class AutoJoinService extends EventEmitter {
         disabled: targetComponent.disabled,
       });
 
-      // ✅ METHOD 1: Use the selfbot's clickButton method with component
       if (typeof (message as any).clickButton === 'function') {
         console.log(`🔥 [AUTOJOIN] Using selfbot clickButton method`);
         
@@ -736,7 +722,6 @@ export class AutoJoinService extends EventEmitter {
         } catch (err) {
           console.log(`🔥 [AUTOJOIN] clickButton with component failed:`, formatError(err));
           
-          // Try with customId string as fallback
           try {
             const id = targetComponent.customId || targetComponent.custom_id || buttonCustomId;
             await (message as any).clickButton(id);
@@ -748,7 +733,6 @@ export class AutoJoinService extends EventEmitter {
         }
       }
 
-      // ✅ METHOD 2: Use the click method (alternative)
       if (typeof (message as any).click === 'function') {
         console.log(`🔥 [AUTOJOIN] Using fallback click method`);
         try {
@@ -760,7 +744,6 @@ export class AutoJoinService extends EventEmitter {
         }
       }
 
-      // ✅ METHOD 3: Try clicking by customId directly
       if (typeof (message as any).clickButton === 'function') {
         try {
           await (message as any).clickButton(buttonCustomId);
