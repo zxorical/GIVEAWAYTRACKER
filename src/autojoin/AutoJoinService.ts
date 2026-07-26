@@ -113,20 +113,45 @@ export class AutoJoinService extends EventEmitter {
   async handleGiveawayDetected(data: GiveawayToEnter): Promise<void> {
     const { messageId, channelId, guildId, buttonCustomId, prize } = data;
 
+    console.log('[DEBUG] AutoJoinService.handleGiveawayDetected called:', {
+      messageId,
+      guildId,
+      buttonCustomId,
+      prize: prize?.slice(0, 50),
+    });
+
     if (!buttonCustomId) {
+      console.log('[DEBUG] ❌ No buttonCustomId, skipping autojoin');
       logger.debug('No button customId, skipping autojoin', { messageId });
       return;
     }
 
     const dedupKey = `${channelId}:${messageId}`;
-    if (this.processing.has(dedupKey)) return;
+    if (this.processing.has(dedupKey)) {
+      console.log('[DEBUG] ⏭️ Already processing this giveaway:', dedupKey);
+      return;
+    }
     this.processing.add(dedupKey);
 
     try {
       this.stats.totalDetected++;
 
       const premiumUsers = await getAllPremiumUsers(guildId);
-      if (premiumUsers.length === 0) return;
+      console.log('[DEBUG] Found premium users:', {
+        guildId,
+        count: premiumUsers.length,
+        users: premiumUsers.map(u => ({
+          userId: u.userId,
+          isPremium: u.isPremium,
+          hasToken: !!u.token,
+          tokenEntries: u.tokenEntries,
+        })),
+      });
+
+      if (premiumUsers.length === 0) {
+        console.log('[DEBUG] ❌ No premium users found for guild:', guildId);
+        return;
+      }
 
       logger.info(`Auto-joining ${premiumUsers.length} premium users for "${truncate(prize, 50)}"`, {
         component: 'AutoJoinService',
@@ -337,11 +362,22 @@ export class AutoJoinService extends EventEmitter {
     guildName: string,
     channelName: string,
   ): Promise<boolean> {
+    console.log('[DEBUG] 🔄 enterGiveawayForUser called:', {
+      userId,
+      guildId,
+      messageId,
+      buttonCustomId,
+      prize: prize?.slice(0, 50),
+    });
+
     this.stats.totalAttempted++;
 
     const hasPremium = await isPremiumUser(userId, guildId);
+    console.log('[DEBUG] Premium check:', { userId, guildId, hasPremium });
+    
     if (!hasPremium) {
       this.stats.totalSkipped++;
+      console.log('[DEBUG] ❌ User is not premium, skipping');
       return false;
     }
 
@@ -353,7 +389,16 @@ export class AutoJoinService extends EventEmitter {
     this.rateLimits.set(userId, Date.now());
 
     const tokenData = await getUserToken(userId, guildId);
+    console.log('[DEBUG] Token data:', {
+      userId,
+      guildId,
+      hasToken: !!tokenData.token,
+      tokenLabel: tokenData.label,
+      tokenPreview: tokenData.token ? tokenData.token.substring(0, 20) + '...' : null,
+    });
+
     if (!tokenData.token) {
+      console.log('[DEBUG] ❌ No token found for user:', userId);
       logger.debug(`No token for user ${userId}`);
       this.stats.totalSkipped++;
       return false;
@@ -362,7 +407,9 @@ export class AutoJoinService extends EventEmitter {
     let token: string;
     try {
       token = decryptToken(tokenData.token);
+      console.log('[DEBUG] ✅ Token decrypted successfully, length:', token.length);
     } catch (err) {
+      console.log('[DEBUG] ❌ Failed to decrypt token:', err);
       logger.error(`Failed to decrypt token for user ${userId}`, { 
         error: formatError(err) 
       });
@@ -402,13 +449,18 @@ export class AutoJoinService extends EventEmitter {
     let lastError: string | null = null;
     for (let attempt = 1; attempt <= ENTRY_RETRY_ATTEMPTS; attempt++) {
       try {
+        console.log(`[DEBUG] Attempt ${attempt}/${ENTRY_RETRY_ATTEMPTS} for user ${userId}`);
+        
+        // Try the specific button first
         await this.clickButton(session.client, channelId, messageId, buttonCustomId);
         
+        // Success!
         await incrementTokenEntries(userId, guildId);
         await updateTokenLastUsed(userId, guildId);
         this.stats.totalSuccess++;
         session.entries++;
 
+        console.log(`[DEBUG] ✅ Autojoined for user ${userId} on attempt ${attempt}`);
         logger.debug(`Autojoined for user ${userId}`, {
           component: 'AutoJoinService',
           prize: truncate(prize, 50),
@@ -418,6 +470,33 @@ export class AutoJoinService extends EventEmitter {
         return true;
       } catch (err) {
         lastError = formatError(err);
+        console.log(`[DEBUG] ❌ Attempt ${attempt} failed for user ${userId}:`, lastError);
+        
+        // If the specific button fails, try ANY button on the last attempt
+        if (attempt === ENTRY_RETRY_ATTEMPTS) {
+          console.log('[DEBUG] Specific button failed, trying any entry button as fallback...');
+          try {
+            await this.clickAnyButton(session.client, channelId, messageId);
+            
+            // Success with fallback!
+            await incrementTokenEntries(userId, guildId);
+            await updateTokenLastUsed(userId, guildId);
+            this.stats.totalSuccess++;
+            session.entries++;
+
+            console.log(`[DEBUG] ✅ Autojoined for user ${userId} via fallback`);
+            logger.debug(`Autojoined for user ${userId} (fallback)`, {
+              component: 'AutoJoinService',
+              prize: truncate(prize, 50),
+              attempt,
+            });
+
+            return true;
+          } catch (fallbackErr) {
+            lastError = formatError(fallbackErr);
+            console.log('[DEBUG] ❌ Fallback button also failed:', lastError);
+          }
+        }
         
         if (lastError.includes('401') || lastError.includes('403') || lastError.includes('invalid')) {
           this.sessions.delete(sessionKey);
@@ -484,6 +563,8 @@ export class AutoJoinService extends EventEmitter {
     return client;
   }
 
+  // ─── BUTTON CLICKING METHODS ──────────────────────────────────
+
   private async clickButton(
     client: Client,
     channelId: string,
@@ -491,51 +572,320 @@ export class AutoJoinService extends EventEmitter {
     buttonCustomId: string,
   ): Promise<void> {
     try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || !('messages' in channel)) {
-        throw new Error('Channel not found or not a text channel');
-      }
-
-      const message = await channel.messages.fetch(messageId);
-      if (!message) {
-        throw new Error('Message not found');
-      }
-
-      const msg = message as any;
-      if (typeof msg.clickButton === 'function') {
-        await msg.clickButton(buttonCustomId);
-        return;
-      }
-
+      // Get the token from the client
       const token = (client as any).token;
       if (!token) throw new Error('No token available');
 
-      const response = await fetch('https://discord.com/api/v10/interactions', {
-        method: 'POST',
-        headers: {
-          'Authorization': token,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          type: 3,
-          guild_id: message.guild?.id,
-          channel_id: message.channel.id,
-          message_id: message.id,
-          data: {
-            component_type: 2,
-            custom_id: buttonCustomId,
-          },
-        }),
+      console.log('[DEBUG] clickButton called:', {
+        channelId,
+        messageId,
+        buttonCustomId,
+        hasToken: !!token,
       });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`HTTP ${response.status}: ${text}`);
+      // Method 1: Try the selfbot's built-in clickButton
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'messages' in channel) {
+          const message = await channel.messages.fetch(messageId);
+          if (message) {
+            const msg = message as any;
+            if (typeof msg.clickButton === 'function') {
+              console.log('[DEBUG] Using selfbot clickButton method');
+              await msg.clickButton(buttonCustomId);
+              console.log('[DEBUG] Selfbot clickButton succeeded');
+              return;
+            }
+          }
+        }
+      } catch (selfbotErr) {
+        console.log('[DEBUG] Selfbot clickButton failed, falling back to API:', formatError(selfbotErr));
       }
+
+      // Method 2: Direct API call with proper headers
+      console.log('[DEBUG] Using direct API call for button click');
+      
+      // Get the message data from API
+      const messageData = await this.fetchMessageData(token, channelId, messageId);
+      if (!messageData) {
+        throw new Error('Failed to fetch message data');
+      }
+
+      console.log('[DEBUG] Message data fetched, finding button...');
+
+      // Find the button in the message data
+      const button = this.findButtonInMessage(messageData, buttonCustomId);
+      if (!button) {
+        // Try to find ANY entry button
+        const anyButton = this.findAnyEntryButtonInMessage(messageData);
+        if (anyButton) {
+          console.log('[DEBUG] Found alternative button:', anyButton.custom_id);
+          const customId = anyButton.custom_id || anyButton.customId;
+          await this.sendInteraction(token, channelId, messageId, customId, messageData);
+          return;
+        }
+        throw new Error(`Button ${buttonCustomId} not found in message`);
+      }
+
+      console.log('[DEBUG] Found button:', {
+        customId: button.custom_id || button.customId,
+        label: button.label,
+        type: button.type,
+        style: button.style,
+      });
+
+      // Send the interaction
+      await this.sendInteraction(token, channelId, messageId, buttonCustomId, messageData);
+      console.log('[DEBUG] Button clicked successfully via API');
+
     } catch (err) {
       throw new Error(`Failed to click button: ${formatError(err)}`);
     }
   }
+
+  private async clickAnyButton(
+    client: Client,
+    channelId: string,
+    messageId: string,
+  ): Promise<void> {
+    try {
+      const token = (client as any).token;
+      if (!token) throw new Error('No token available');
+
+      console.log('[DEBUG] clickAnyButton called:', { channelId, messageId });
+
+      // Get the message data from API
+      const messageData = await this.fetchMessageData(token, channelId, messageId);
+      if (!messageData) {
+        throw new Error('Failed to fetch message data');
+      }
+
+      // Find ANY button that looks like an entry button
+      const button = this.findAnyEntryButtonInMessage(messageData);
+      if (!button) {
+        throw new Error('No entry button found in message');
+      }
+
+      const customId = button.custom_id || button.customId;
+      console.log('[DEBUG] Found entry button:', {
+        customId,
+        label: button.label,
+        type: button.type,
+        style: button.style,
+      });
+
+      await this.sendInteraction(token, channelId, messageId, customId, messageData);
+      console.log('[DEBUG] Entry button clicked successfully');
+
+    } catch (err) {
+      throw new Error(`Failed to click any button: ${formatError(err)}`);
+    }
+  }
+
+  private async fetchMessageData(token: string, channelId: string, messageId: string): Promise<any> {
+    const response = await fetch(
+      `https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`,
+      {
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.log('[DEBUG] Fetch message failed:', {
+        status: response.status,
+        text: text,
+      });
+      throw new Error(`Failed to fetch message: ${response.status} - ${text}`);
+    }
+
+    return await response.json();
+  }
+
+  private findButtonInMessage(messageData: any, customId: string): any {
+    const components = messageData.components || [];
+    for (const row of components) {
+      for (const comp of row.components || []) {
+        if (comp.type === 2) {
+          const id = comp.custom_id || comp.customId;
+          if (id === customId && !comp.disabled) {
+            return comp;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private findAnyEntryButtonInMessage(messageData: any): any {
+    const components = messageData.components || [];
+    
+    // Patterns for entry buttons
+    const entryPatterns = [
+      /enter/i,
+      /join/i,
+      /giveaway/i,
+      /participate/i,
+      /raffle/i,
+      /sweepstakes/i,
+    ];
+
+    // Trusted custom IDs
+    const trustedIds = [
+      'giveaway_message',
+      'giveaway-enter',
+      'enter_giveaway',
+      'giveaway_enter',
+      'join_giveaway',
+      'giveaway-join',
+      'giveaway_participate',
+      'participate_giveaway',
+      'enter',
+    ];
+
+    for (const row of components) {
+      for (const comp of row.components || []) {
+        if (comp.type === 2 && !comp.disabled) {
+          const customId = comp.custom_id || comp.customId;
+          const label = (comp.label || '').toLowerCase();
+          
+          // Check trusted IDs
+          if (customId && trustedIds.includes(customId)) {
+            return comp;
+          }
+          
+          // Check label patterns
+          if (entryPatterns.some(pattern => pattern.test(label))) {
+            return comp;
+          }
+          
+          // Check bare number (GiveawayBoat style)
+          if (label.match(/^\d[\d,]*$/)) {
+            return comp;
+          }
+          
+          // Check emoji patterns
+          if (label.includes('🎉') || label.includes('🎁') || label.includes('🏆')) {
+            return comp;
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  private async sendInteraction(
+    token: string,
+    channelId: string,
+    messageId: string,
+    customId: string,
+    messageData: any
+  ): Promise<void> {
+    // Get the session ID
+    const sessionId = this.getSessionId();
+    const nonce = `${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
+    const applicationId = messageData.author?.id || messageData.application_id || messageData.webhook_id;
+
+    if (!applicationId) {
+      throw new Error('Could not determine application ID');
+    }
+
+    const payload = {
+      type: 3,
+      nonce: nonce,
+      guild_id: messageData.guild_id || null,
+      channel_id: channelId,
+      message_id: messageId,
+      application_id: applicationId,
+      session_id: sessionId,
+      data: {
+        component_type: 2,
+        custom_id: customId,
+      },
+    };
+
+    console.log('[DEBUG] Sending interaction:', {
+      channelId,
+      messageId,
+      customId,
+      applicationId,
+      sessionId,
+      nonce,
+    });
+
+    const response = await fetch('https://discord.com/api/v10/interactions', {
+      method: 'POST',
+      headers: {
+        'Authorization': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.log('[DEBUG] Interaction failed:', {
+        status: response.status,
+        text: text,
+      });
+      
+      // If rate limited, retry after the specified time
+      if (response.status === 429) {
+        const data = await response.json();
+        const retryAfter = data.retry_after || 1;
+        console.log(`[DEBUG] Rate limited, waiting ${retryAfter}s...`);
+        await delay(retryAfter * 1000);
+        // Retry once
+        const retryResponse = await fetch('https://discord.com/api/v10/interactions', {
+          method: 'POST',
+          headers: {
+            'Authorization': token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        if (!retryResponse.ok) {
+          const retryText = await retryResponse.text();
+          throw new Error(`Interaction failed after retry: ${retryResponse.status} - ${retryText}`);
+        }
+        return;
+      }
+      
+      throw new Error(`Interaction failed: ${response.status} - ${text}`);
+    }
+
+    console.log('[DEBUG] Interaction sent successfully');
+  }
+
+  private getSessionId(): string {
+    // Try to get the session ID from the client
+    // First check if we have a stored session ID
+    if ((this as any)._sessionId) {
+      return (this as any)._sessionId;
+    }
+    
+    // Check if any session has a client with a session ID
+    for (const [, session] of this.sessions) {
+      try {
+        const clientAny = session.client as any;
+        if (clientAny._sessionId || clientAny.sessionId) {
+          const id = clientAny._sessionId || clientAny.sessionId;
+          // Store it for future use
+          (this as any)._sessionId = id;
+          return id;
+        }
+      } catch {}
+    }
+    
+    // Fallback: generate a random session ID
+    return Math.random().toString(36).substring(2, 15);
+  }
+
+  // ─── WEBHOOK & UTILITY METHODS ────────────────────────────────
 
   /**
    * Send clean win webhook - no emojis, just "GIVEAWAY WON" with the win message
