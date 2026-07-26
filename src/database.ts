@@ -680,12 +680,16 @@ export async function isPremiumUser(
   return !!user;
 }
 
-export async function getAllPremiumUsers(guildId: string): Promise<PremiumUser[]> {
+// ✅ FIXED: getAllPremiumUsers with optional guildId
+export async function getAllPremiumUsers(guildId?: string): Promise<PremiumUser[]> {
   await ensureConnected();
-  return premiumUsersCol.find({
-    guildId,
-    isPremium: true,
-  }).toArray();
+  
+  const query: any = { isPremium: true };
+  if (guildId) {
+    query.guildId = guildId;
+  }
+  
+  return premiumUsersCol.find(query).toArray();
 }
 
 export async function getPremiumUsersBySource(
