@@ -82,6 +82,15 @@ interface AutoJoinStats {
   startedAt: number;
 }
 
+interface ButtonComponent {
+  type: number;
+  customId?: string;
+  custom_id?: string;
+  label?: string;
+  style?: number;
+  disabled?: boolean;
+}
+
 // ─── AUTOJOIN SERVICE ─────────────────────────────────────────────
 
 export class AutoJoinService extends EventEmitter {
@@ -660,13 +669,16 @@ export class AutoJoinService extends EventEmitter {
 
       // Find the button component
       const components = (message as any).components || [];
-      let targetComponent = null;
+      let targetComponent: ButtonComponent | null = null;
       
       for (const row of components) {
         for (const comp of row.components || []) {
-          if (comp.type === 2 && comp.customId === buttonCustomId) {
-            targetComponent = comp;
-            break;
+          if (comp.type === 2) {
+            const id = comp.customId || comp.custom_id;
+            if (id === buttonCustomId) {
+              targetComponent = comp as ButtonComponent;
+              break;
+            }
           }
         }
         if (targetComponent) break;
@@ -687,9 +699,9 @@ export class AutoJoinService extends EventEmitter {
                 label.includes('🎁') ||
                 /^\d[\d,]*$/.test(label)
               ) {
-                targetComponent = comp;
+                targetComponent = comp as ButtonComponent;
                 console.log(`🔥 [AUTOJOIN] Found fallback entry button:`, {
-                  customId: comp.customId,
+                  customId: comp.customId || comp.custom_id,
                   label: comp.label,
                 });
                 break;
@@ -705,8 +717,9 @@ export class AutoJoinService extends EventEmitter {
         throw new Error(`Button ${buttonCustomId} not found`);
       }
 
+      const foundCustomId = targetComponent.customId || targetComponent.custom_id || 'unknown';
       console.log(`🔥 [AUTOJOIN] Found button:`, {
-        customId: targetComponent.customId,
+        customId: foundCustomId,
         label: targetComponent.label,
         style: targetComponent.style,
         disabled: targetComponent.disabled,
@@ -725,7 +738,8 @@ export class AutoJoinService extends EventEmitter {
           
           // Try with customId string as fallback
           try {
-            await (message as any).clickButton(targetComponent.customId);
+            const id = targetComponent.customId || targetComponent.custom_id || buttonCustomId;
+            await (message as any).clickButton(id);
             console.log(`🔥 [AUTOJOIN] ✅ Selfbot clickButton succeeded (with customId)`);
             return;
           } catch (err2) {
