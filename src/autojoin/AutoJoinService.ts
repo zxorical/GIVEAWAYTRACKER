@@ -513,7 +513,7 @@ export class AutoJoinService extends EventEmitter {
     
     const client = new Client();
 
-    // ✅ Add ALL debug listeners
+    // Debug listeners
     client.on('debug', (info) => {
       console.log(`🔥 [AUTOJOIN] [${userId}] Debug:`, info.slice(0, 100));
     });
@@ -532,7 +532,7 @@ export class AutoJoinService extends EventEmitter {
       console.log(`🔥 [AUTOJOIN] [${userId}] ⚠️ Disconnected`);
     });
 
-    // ✅ Set up message handler BEFORE login
+    // Message handler
     client.on('messageCreate', async (message: Message) => {
       console.log(`🔥 [AUTOJOIN] [${userId}] 📨 MESSAGE RECEIVED!`, {
         channelId: message.channel.id,
@@ -544,13 +544,11 @@ export class AutoJoinService extends EventEmitter {
         hasComponents: !!(message as any).components?.length,
       });
 
-      // Skip own messages
       if (message.author?.id === client.user?.id) {
         console.log(`🔥 [AUTOJOIN] [${userId}] ⏭️ Skipping own message`);
         return;
       }
 
-      // Check for wins
       if (message.guild) {
         await this.checkGuildWin(message);
       } else {
@@ -568,18 +566,15 @@ export class AutoJoinService extends EventEmitter {
       throw err;
     }
 
-    // ✅ Wait for client to be ready - with better handling
     console.log(`🔥 [AUTOJOIN] [${userId}] Waiting for client to be ready...`);
     
     let readyResolved = false;
 
-    // Check if already ready
     if (client.isReady()) {
       console.log(`🔥 [AUTOJOIN] [${userId}] ✅ Client is already ready!`);
       readyResolved = true;
     }
 
-    // Wait for ready event
     if (!readyResolved) {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
@@ -607,7 +602,6 @@ export class AutoJoinService extends EventEmitter {
       });
     }
 
-    // ✅ If not ready after event, wait a bit more
     if (!client.isReady()) {
       console.log(`🔥 [AUTOJOIN] [${userId}] ⚠️ Client not ready, waiting 2 more seconds...`);
       await delay(2000);
@@ -637,13 +631,11 @@ export class AutoJoinService extends EventEmitter {
       buttonCustomId,
     });
 
-    // Get token directly from client
     const token = (client as any).token;
     if (!token) {
       throw new Error('No token available from client');
     }
 
-    // Fetch message data using direct API
     const messageData = await this.fetchMessageData(token, channelId, messageId);
     if (!messageData) {
       throw new Error('Failed to fetch message data');
@@ -656,10 +648,8 @@ export class AutoJoinService extends EventEmitter {
       componentsCount: messageData.components?.length || 0,
     });
 
-    // Find the button
     let button = this.findButtonInMessage(messageData, buttonCustomId);
     if (!button) {
-      // Try to find ANY entry button
       button = this.findAnyEntryButtonInMessage(messageData);
       if (!button) {
         const available = this.listAvailableButtons(messageData);
@@ -675,7 +665,6 @@ export class AutoJoinService extends EventEmitter {
       disabled: button.disabled,
     });
 
-    // Send interaction
     await this.sendInteraction(token, channelId, messageId, buttonCustomId, messageData);
     console.log(`🔥 [AUTOJOIN] ✅ Button clicked successfully via API`);
   }
